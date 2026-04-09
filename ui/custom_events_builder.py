@@ -1481,6 +1481,17 @@ class CanvasTimelinePanel(ttk.Frame):
         if dur_ms > 0:
             candidates.append(self._playhead_ms)  # same value; distance for end handled below
 
+        # Other event start/end boundaries
+        drag_idx = self._drag['idx'] if self._drag else None
+        for i, ev in enumerate(self.events):
+            if i == drag_idx:
+                continue
+            t = float(ev['time'])
+            d = float(ev['params'].get('duration_ms', 0))
+            candidates.append(t)
+            if d > 0:
+                candidates.append(t + d)
+
         # --- Test start edge ---
         best_start = min(candidates, key=lambda c: abs(raw_ms - c))
         dist_start = abs(raw_ms - best_start)
@@ -1520,6 +1531,16 @@ class CanvasTimelinePanel(ttk.Frame):
 
         candidates.append(self._playhead_ms)
 
+        drag_idx = self._drag['idx'] if self._drag else None
+        for i, ev in enumerate(self.events):
+            if i == drag_idx:
+                continue
+            t = float(ev['time'])
+            d = float(ev['params'].get('duration_ms', 0))
+            candidates.append(t)
+            if d > 0:
+                candidates.append(t + d)
+
         best = min(candidates, key=lambda c: abs(raw_end_ms - c))
         if abs(raw_end_ms - best) <= threshold_ms:
             self._snap_target_ms = best
@@ -1527,6 +1548,37 @@ class CanvasTimelinePanel(ttk.Frame):
 
         self._snap_target_ms = None
         return raw_end_ms
+
+    def _snap_start(self, raw_start_ms: float) -> float:
+        """Snap a start-time value for left-edge resize drags.
+
+        Returns the snapped start time in ms and sets _snap_target_ms.
+        """
+        threshold_ms = self.SNAP_THRESHOLD_PX * 1000.0 / max(self.zoom, 0.001)
+        candidates: List[float] = []
+
+        if self._snap_interval_ms > 0:
+            candidates.append(round(raw_start_ms / self._snap_interval_ms) * self._snap_interval_ms)
+
+        candidates.append(self._playhead_ms)
+
+        drag_idx = self._drag['idx'] if self._drag else None
+        for i, ev in enumerate(self.events):
+            if i == drag_idx:
+                continue
+            t = float(ev['time'])
+            d = float(ev['params'].get('duration_ms', 0))
+            candidates.append(t)
+            if d > 0:
+                candidates.append(t + d)
+
+        best = min(candidates, key=lambda c: abs(raw_start_ms - c))
+        if abs(raw_start_ms - best) <= threshold_ms:
+            self._snap_target_ms = best
+            return best
+
+        self._snap_target_ms = None
+        return raw_start_ms
 
     def _draw_snap_indicator(self, cw: float, ch: float):
         """Draw a cyan snap-target line when an event is snapping during drag."""
@@ -1637,7 +1689,12 @@ class CanvasTimelinePanel(ttk.Frame):
             chosen = hits[(pos + 1) % len(hits)]
 
         x1, y1, x2, y2 = self._block_rects[chosen]
-        mode = 'resize' if x >= x2 - self.RESIZE_ZONE else 'move'
+        if x >= x2 - self.RESIZE_ZONE:
+            mode = 'resize'
+        elif x <= x1 + self.RESIZE_ZONE:
+            mode = 'resize_left'
+        else:
+            mode = 'move'
         return chosen, mode
 
     # ------------------------------------------------------------------ #
@@ -1715,11 +1772,19 @@ class CanvasTimelinePanel(ttk.Frame):
                     raw_ms = self._drag['orig_time'] + delta_ms
                     snapped = self._apply_snap(raw_ms, dur_ms=float(self._drag['orig_dur']))
                     self.events[idx]['time'] = max(0, int(snapped))
-                else:  # resize — snap the end edge
+                elif self._drag['mode'] == 'resize':  # right-edge resize
                     raw_end_ms = self._drag['orig_time'] + self._drag['orig_dur'] + delta_ms
                     start_ms = float(self.events[idx]['time'])
                     snapped_end = self._snap_end(raw_end_ms)
                     new_dur = max(100, int(snapped_end - start_ms))
+                    self.events[idx]['params']['duration_ms'] = new_dur
+                else:  # resize_left — left-edge resize
+                    raw_start = self._drag['orig_time'] + delta_ms
+                    orig_end = self._drag['orig_time'] + self._drag['orig_dur']
+                    snapped_start = self._snap_start(raw_start)
+                    new_start = max(0, int(snapped_start))
+                    new_dur = max(100, int(orig_end - new_start))
+                    self.events[idx]['time'] = new_start
                     self.events[idx]['params']['duration_ms'] = new_dur
 
                 self.redraw()
@@ -1852,7 +1917,7 @@ class CanvasTimelinePanel(ttk.Frame):
             self.canvas.config(cursor='hand2')
             return
         _, mode = self._hit_test(x, y)
-        if mode == 'resize':
+        if mode in ('resize', 'resize_left'):
             self.canvas.config(cursor='sb_h_double_arrow')
         elif mode == 'move':
             self.canvas.config(cursor='fleur')
@@ -2254,6 +2319,19 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self.protocol('WM_DELETE_WINDOW', self._on_close)
 
     def _on_close(self):
+        if self.is_dirty and self.timeline_panel.events:
+            result = messagebox.askyesnocancel(
+                "Unsaved Changes",
+                "You have unsaved changes. Save before closing?",
+                parent=self
+            )
+            if result is True:        # Yes → save then close
+                self.on_save_file()
+                if self.is_dirty:     # save failed or was cancelled by user
+                    return
+            elif result is None:      # Cancel → abort close
+                return
+            # False → No, discard changes and close
         _theme.unregister(self._on_theme_change)
         self._video_panel.stop()
         self.destroy()
