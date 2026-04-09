@@ -276,6 +276,7 @@ class ParameterPanel(ttk.Frame):
         # Callbacks to parent dialog
         self.apply_callback = apply_callback
         self.reset_callback = reset_callback
+        self.save_default_callback = None
 
         self.setup_ui()
         _theme.register(self._on_theme_change)
@@ -318,11 +319,19 @@ class ParameterPanel(ttk.Frame):
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+        # Buttons frame — packed before preview so it's always visible
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(fill=tk.X, pady=5, side=tk.BOTTOM)
+
+        ttk.Button(btn_frame, text="Reset to Defaults", command=self.reset_to_defaults).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Apply Parameters", command=self.apply_parameters).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Save as Default", command=self._on_save_default).pack(side=tk.LEFT, padx=2)
+
         # Event steps preview section
         preview_frame = ttk.LabelFrame(self, text="Event Steps Preview", padding=5)
-        preview_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
+        preview_frame.pack(fill=tk.BOTH, expand=False, pady=(5, 0), side=tk.BOTTOM)
 
-        self.steps_text = tk.Text(preview_frame, height=20, wrap=tk.WORD,
+        self.steps_text = tk.Text(preview_frame, height=8, wrap=tk.WORD,
                                   font=('Courier', 9),
                                   relief=tk.FLAT, state=tk.DISABLED)
         steps_scrollbar = ttk.Scrollbar(preview_frame, orient='vertical', command=self.steps_text.yview)
@@ -330,13 +339,6 @@ class ParameterPanel(ttk.Frame):
 
         self.steps_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         steps_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # Buttons frame
-        btn_frame = ttk.Frame(self)
-        btn_frame.pack(fill=tk.X, pady=5)
-
-        ttk.Button(btn_frame, text="Reset to Defaults", command=self.reset_to_defaults).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="Apply Parameters", command=self.apply_parameters).pack(side=tk.LEFT, padx=2)
 
         self.show_placeholder()
 
@@ -659,6 +661,10 @@ class ParameterPanel(ttk.Frame):
         if self.apply_callback:
             self.apply_callback()
 
+    def _on_save_default(self):
+        if self.save_default_callback:
+            self.save_default_callback()
+
 
 class CanvasTimelinePanel(ttk.Frame):
     """Canvas-based interactive timeline for event scheduling.
@@ -727,7 +733,8 @@ class CanvasTimelinePanel(ttk.Frame):
                  on_resize_callback=None,
                  change_callback=None,
                  add_callback=None,
-                 duplicate_callback=None):
+                 duplicate_callback=None,
+                 change_type_callback=None):
         super().__init__(parent)
 
         # ---- Data ----
@@ -777,7 +784,8 @@ class CanvasTimelinePanel(ttk.Frame):
         self.on_resize_callback = on_resize_callback
         self.change_callback    = change_callback
         self.add_callback       = add_callback
-        self.duplicate_callback = duplicate_callback
+        self.duplicate_callback   = duplicate_callback
+        self.change_type_callback = change_type_callback
         self.on_redraw_callback = None    # set externally; called after every redraw
         self.on_playhead_change = None    # set externally; called with ms when playhead moves
         self.play_pause_callback = None   # set externally; called when spacebar pressed
@@ -841,11 +849,12 @@ class CanvasTimelinePanel(ttk.Frame):
 
         # --- Context menus ---
         self._ctx = tk.Menu(self, tearoff=0)
-        self._ctx.add_command(label="Edit Parameters", command=self._ctx_edit)
-        self._ctx.add_command(label="Change Time",     command=self._on_change_time_btn)
-        self._ctx.add_command(label="Duplicate",       command=self._on_duplicate)
+        self._ctx.add_command(label="Edit Parameters",   command=self._ctx_edit)
+        self._ctx.add_command(label="Change Event Type", command=self._ctx_change_type)
+        self._ctx.add_command(label="Change Time",       command=self._on_change_time_btn)
+        self._ctx.add_command(label="Duplicate",         command=self._on_duplicate)
         self._ctx.add_separator()
-        self._ctx.add_command(label="Remove",          command=self._on_remove)
+        self._ctx.add_command(label="Remove",            command=self._on_remove)
 
         self._ctx_bg = tk.Menu(self, tearoff=0)
         self._ctx_bg.add_command(label="Add Event here", command=self._on_add_at_ctx)
@@ -1481,6 +1490,17 @@ class CanvasTimelinePanel(ttk.Frame):
         if dur_ms > 0:
             candidates.append(self._playhead_ms)  # same value; distance for end handled below
 
+        # Other event start/end boundaries
+        drag_idx = self._drag['idx'] if self._drag else None
+        for i, ev in enumerate(self.events):
+            if i == drag_idx:
+                continue
+            t = float(ev['time'])
+            d = float(ev['params'].get('duration_ms', 0))
+            candidates.append(t)
+            if d > 0:
+                candidates.append(t + d)
+
         # --- Test start edge ---
         best_start = min(candidates, key=lambda c: abs(raw_ms - c))
         dist_start = abs(raw_ms - best_start)
@@ -1520,6 +1540,16 @@ class CanvasTimelinePanel(ttk.Frame):
 
         candidates.append(self._playhead_ms)
 
+        drag_idx = self._drag['idx'] if self._drag else None
+        for i, ev in enumerate(self.events):
+            if i == drag_idx:
+                continue
+            t = float(ev['time'])
+            d = float(ev['params'].get('duration_ms', 0))
+            candidates.append(t)
+            if d > 0:
+                candidates.append(t + d)
+
         best = min(candidates, key=lambda c: abs(raw_end_ms - c))
         if abs(raw_end_ms - best) <= threshold_ms:
             self._snap_target_ms = best
@@ -1527,6 +1557,37 @@ class CanvasTimelinePanel(ttk.Frame):
 
         self._snap_target_ms = None
         return raw_end_ms
+
+    def _snap_start(self, raw_start_ms: float) -> float:
+        """Snap a start-time value for left-edge resize drags.
+
+        Returns the snapped start time in ms and sets _snap_target_ms.
+        """
+        threshold_ms = self.SNAP_THRESHOLD_PX * 1000.0 / max(self.zoom, 0.001)
+        candidates: List[float] = []
+
+        if self._snap_interval_ms > 0:
+            candidates.append(round(raw_start_ms / self._snap_interval_ms) * self._snap_interval_ms)
+
+        candidates.append(self._playhead_ms)
+
+        drag_idx = self._drag['idx'] if self._drag else None
+        for i, ev in enumerate(self.events):
+            if i == drag_idx:
+                continue
+            t = float(ev['time'])
+            d = float(ev['params'].get('duration_ms', 0))
+            candidates.append(t)
+            if d > 0:
+                candidates.append(t + d)
+
+        best = min(candidates, key=lambda c: abs(raw_start_ms - c))
+        if abs(raw_start_ms - best) <= threshold_ms:
+            self._snap_target_ms = best
+            return best
+
+        self._snap_target_ms = None
+        return raw_start_ms
 
     def _draw_snap_indicator(self, cw: float, ch: float):
         """Draw a cyan snap-target line when an event is snapping during drag."""
@@ -1637,7 +1698,12 @@ class CanvasTimelinePanel(ttk.Frame):
             chosen = hits[(pos + 1) % len(hits)]
 
         x1, y1, x2, y2 = self._block_rects[chosen]
-        mode = 'resize' if x >= x2 - self.RESIZE_ZONE else 'move'
+        if x >= x2 - self.RESIZE_ZONE:
+            mode = 'resize'
+        elif x <= x1 + self.RESIZE_ZONE:
+            mode = 'resize_left'
+        else:
+            mode = 'move'
         return chosen, mode
 
     # ------------------------------------------------------------------ #
@@ -1715,11 +1781,19 @@ class CanvasTimelinePanel(ttk.Frame):
                     raw_ms = self._drag['orig_time'] + delta_ms
                     snapped = self._apply_snap(raw_ms, dur_ms=float(self._drag['orig_dur']))
                     self.events[idx]['time'] = max(0, int(snapped))
-                else:  # resize — snap the end edge
+                elif self._drag['mode'] == 'resize':  # right-edge resize
                     raw_end_ms = self._drag['orig_time'] + self._drag['orig_dur'] + delta_ms
                     start_ms = float(self.events[idx]['time'])
                     snapped_end = self._snap_end(raw_end_ms)
                     new_dur = max(100, int(snapped_end - start_ms))
+                    self.events[idx]['params']['duration_ms'] = new_dur
+                else:  # resize_left — left-edge resize
+                    raw_start = self._drag['orig_time'] + delta_ms
+                    orig_end = self._drag['orig_time'] + self._drag['orig_dur']
+                    snapped_start = self._snap_start(raw_start)
+                    new_start = max(0, int(snapped_start))
+                    new_dur = max(100, int(orig_end - new_start))
+                    self.events[idx]['time'] = new_start
                     self.events[idx]['params']['duration_ms'] = new_dur
 
                 self.redraw()
@@ -1852,7 +1926,7 @@ class CanvasTimelinePanel(ttk.Frame):
             self.canvas.config(cursor='hand2')
             return
         _, mode = self._hit_test(x, y)
-        if mode == 'resize':
+        if mode in ('resize', 'resize_left'):
             self.canvas.config(cursor='sb_h_double_arrow')
         elif mode == 'move':
             self.canvas.config(cursor='fleur')
@@ -1866,6 +1940,10 @@ class CanvasTimelinePanel(ttk.Frame):
     def _ctx_edit(self):
         if self.selected_index is not None and self.on_select_callback:
             self.on_select_callback(self.selected_index)
+
+    def _ctx_change_type(self):
+        if self.selected_index is not None and self.change_type_callback:
+            self.change_type_callback(self.selected_index)
 
     def _on_toolbar_add(self):
         self._add_time_ms = None
@@ -2246,7 +2324,6 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self.setup_ui()
         self._load_funscript_duration()
         self._auto_load_events_file()
-
         # Sync canvas to current theme and listen for changes
         CanvasTimelinePanel.apply_canvas_theme(_theme.is_dark())
         self.timeline_panel.redraw()
@@ -2254,6 +2331,19 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self.protocol('WM_DELETE_WINDOW', self._on_close)
 
     def _on_close(self):
+        if self.is_dirty and self.timeline_panel.events:
+            result = messagebox.askyesnocancel(
+                "Unsaved Changes",
+                "You have unsaved changes. Save before closing?",
+                parent=self
+            )
+            if result is True:        # Yes → save then close
+                self.on_save_file()
+                if self.is_dirty:     # save failed or was cancelled by user
+                    return
+            elif result is None:      # Cancel → abort close
+                return
+            # False → No, discard changes and close
         _theme.unregister(self._on_theme_change)
         self._video_panel.stop()
         self.destroy()
@@ -2303,6 +2393,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
 
         params_outer = ttk.LabelFrame(top_paned, text="Parameters", padding=5)
         self.params_panel = ParameterPanel(params_outer, apply_callback=self.on_apply_parameters)
+        self.params_panel.save_default_callback = self.on_save_event_defaults
         self.params_panel.pack(fill=tk.BOTH, expand=True)
         top_paned.add(params_outer, weight=2)
 
@@ -2337,6 +2428,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             change_callback=lambda: self.set_dirty(True),
             add_callback=self.on_add_event_to_timeline_direct,
             duplicate_callback=self.on_duplicate_timeline_event,
+            change_type_callback=self.on_change_event_type,
         )
         self.timeline_panel.pack(fill=tk.BOTH, expand=True)
 
@@ -2372,10 +2464,15 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self.after(100, self._init_sash)
 
     def _init_sash(self):
-        """Give the timeline at least ~220px of height."""
+        """Set initial sash so the timeline is tall enough to show the funscript track."""
+        self.update_idletasks()
         try:
-            h = self.winfo_height()
-            self.main_paned.sashpos(0, max(300, h - 280))
+            total = self.main_paned.winfo_height()
+            if total < 200:
+                self.after(100, self._init_sash)
+                return
+            # Give timeline ~200 px — enough to show ruler + events + funscript waveform
+            self.main_paned.sashpos(0, max(100, total - 200))
         except tk.TclError:
             pass
 
@@ -2878,6 +2975,105 @@ class CustomEventsBuilderDialog(tk.Toplevel):
                     self.timeline_panel.set_funscript(actions)
         except Exception:
             pass  # waveform track stays empty if no matching funscript
+
+    def on_save_event_defaults(self):
+        """Save current parameter values as the new defaults for the event type."""
+        if self.current_editing_index is not None:
+            ev = self.timeline_panel.get_event(self.current_editing_index)
+            event_name = ev['name'] if ev else None
+        elif self.current_event_for_params:
+            event_name = self.current_event_for_params
+        else:
+            return
+
+        if not event_name or event_name not in self.event_definitions:
+            return
+
+        new_params = self.params_panel.get_parameter_values()
+
+        # Update in-memory definition
+        self.event_definitions[event_name]['default_params'].update(new_params)
+
+        # Write back to the definitions YAML file
+        try:
+            with open(EVENT_DEFINITIONS_PATH, 'r') as f:
+                config_data = yaml.safe_load(f)
+            config_data['definitions'][event_name]['default_params'].update(new_params)
+            with open(EVENT_DEFINITIONS_PATH, 'w') as f:
+                yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+            self.status_label.config(text=f"Saved default params for '{event_name}'")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to save defaults: {e}", parent=self)
+            return
+
+        # Offer to update matching timeline events
+        matching = [i for i, ev in enumerate(self.timeline_panel.events)
+                    if ev['name'] == event_name]
+        if matching:
+            if messagebox.askyesno(
+                "Update Timeline Events",
+                f"Update {len(matching)} existing '{event_name}' event(s) on the "
+                f"timeline to use these new defaults?",
+                parent=self
+            ):
+                for i in matching:
+                    self.timeline_panel.events[i]['params'].update(new_params)
+                self.timeline_panel.refresh_display()
+                self.set_dirty(True)
+
+    def on_change_event_type(self, idx: int):
+        """Show a dialog to change the type of a timeline event."""
+        ev = self.timeline_panel.get_event(idx)
+        if ev is None:
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Change Event Type")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        dlg.transient(self)
+
+        ttk.Label(dlg, text="Select new event type:").pack(padx=12, pady=(12, 4))
+
+        event_names = sorted(self.event_definitions.keys())
+        var = tk.StringVar(value=ev['name'])
+        cb = ttk.Combobox(dlg, textvariable=var, values=event_names, state='readonly', width=38)
+        cb.pack(padx=12, pady=4)
+
+        keep_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(dlg, text="Keep compatible parameters", variable=keep_var).pack(padx=12, pady=4)
+
+        result = {}
+
+        def confirm():
+            result['name'] = var.get()
+            result['keep'] = keep_var.get()
+            dlg.destroy()
+
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.pack(pady=(4, 12))
+        ttk.Button(btn_frame, text="OK",     command=confirm).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT, padx=4)
+        self.wait_window(dlg)
+
+        if not result:
+            return
+
+        new_name = result['name']
+        new_def = self.event_definitions[new_name]
+        new_params = dict(new_def['default_params'])
+
+        if result['keep']:
+            for k, v in ev['params'].items():
+                if k in new_params:
+                    new_params[k] = v
+
+        new_idx = self.timeline_panel.update_event(idx, ev['time'], new_name, new_params)
+        self.current_editing_index = new_idx
+        self.params_panel.load_event_parameters(
+            new_name, new_def, current_params=new_params,
+            event_time_ms=ev['time'], event_number=new_idx
+        )
 
     def on_save_file(self):
         if not self.timeline_panel.events:
