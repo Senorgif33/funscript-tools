@@ -81,10 +81,13 @@ Version information for Restim Funscript Processor
         3. Tuned default params for medium event: buzz_freq 30→10, volume_boost 0.05→0.10, ramp_up_ms 250→500
         4. Tuned clutch_tantalize: volume_boost 0.05→0.03; fixed clutch_tranquil volume axis and start/end values
         5. Updated config default interpolation_interval 0.05→0.02 for higher resolution processing
-2.3.3 - Bugfixes:
-        1. Fixed crash (SDL2_mixer access violation) when reopening Custom Event Builder after processing files
-        2. Fixed "NoneType is not iterable" error when loading an event file with an empty events section
-        3. Fixed fallback dark theme when sv_ttk is not installed
+2.3.3 - Custom Event Builder UX improvements and bugfixes:
+        1. Dragging or resizing events now snaps to other events' start/end edges
+        2. Events can be resized from the left edge (moves start time, end time stays fixed)
+        3. Closing the editor with unsaved changes now prompts to save, discard, or cancel
+        4. Fixed crash (SDL2_mixer access violation) when reopening Custom Event Builder after processing files
+        5. Fixed "NoneType is not iterable" error when loading an event file with an empty events section
+        6. Fixed fallback dark theme when sv_ttk is not installed (feat: snap to events, left-edge resize, unsaved-changes prompt, edit defaults, change event type, timeline sash fix (v2.3.3))
 2.3.2 - Dark mode persistence:
         1. Dark/light mode preference now saved to config.json and restored on next launch
 2.3.1 - Video window keyboard focus and waveform toggle:
