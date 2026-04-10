@@ -81,6 +81,12 @@ Version information for Restim Funscript Processor
         3. Tuned default params for medium event: buzz_freq 30→10, volume_boost 0.05→0.10, ramp_up_ms 250→500
         4. Tuned clutch_tantalize: volume_boost 0.05→0.03; fixed clutch_tranquil volume axis and start/end values
         5. Updated config default interpolation_interval 0.05→0.02 for higher resolution processing
+2.3.4 - Video playback performance improvements:
+        1. Eliminated audio blip when seeking while paused (mute during decode window)
+        2. Canvas image item is reused each frame (itemconfig) instead of delete+recreate, reducing per-frame overhead
+        3. Canvas dimensions cached via <Configure> binding; metadata (duration/fps) cached after first read
+        4. Time label and seek bar throttled to ~5 fps during playback (still updates immediately on seek)
+        5. Timeline canvas redraws throttled to ~15 fps during video playback (playhead position still updates every tick)
 2.3.3 - Custom Event Builder UX improvements:
         1. Dragging or resizing events now snaps to other events' start/end edges
         2. Events can be resized from the left edge (moves start time, end time stays fixed)
@@ -132,7 +138,7 @@ Version information for Restim Funscript Processor
         8. Changed medium and fast stroke_offset default 0.1→0 (center-aligned strokes)
 """
 
-__version__ = "2.3.3"
+__version__ = "2.3.4"
 __app_name__ = "Restim Funscript Processor"
 __description__ = "GUI application for processing funscript files for electrostimulation devices"
 __author__ = "Funscript Tools Project"

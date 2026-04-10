@@ -1,31 +1,13 @@
-## What's New in v2.3.2
+# What's New in v2.3.4
 
-### New Features (merged from contributor PR #10 + follow-up fixes)
+## Video Playback Performance Improvements
 
-**Canvas Timeline (Custom Event Builder)**
-1. Replaced the basic event list with a fully interactive canvas timeline — drag blocks to reposition, drag right edge to resize event duration
-2. Zoom with Ctrl+scroll, pan with scroll or drag background
-3. Snap-to-grid (Off / 0.5s / 1s / 5s / 10s / 30s / 1m)
-4. Undo / Redo support
-5. Funscript waveform overlay — auto-loads matching `.funscript` when opening an events file
-6. Playhead indicator
-7. Conflict detection — overlapping events warn before save/apply
-8. Category-coloured event blocks (mcb / clutch / test / general)
+1. **No more audio blip on seek** — player is muted during the brief decode window when seeking while paused; volume restores cleanly on resume or play
+2. **Faster frame rendering** — canvas image item is reused each frame (`itemconfig`) instead of deleted and recreated, reducing per-frame overhead
+3. **Cached canvas dimensions & metadata** — canvas size is cached via a `<Configure>` binding; video duration and FPS are read from metadata only once after the first successful decode
+4. **Throttled UI updates** — time label and seek bar update at ~5 fps during playback (still update immediately on seek/pause); timeline canvas redraws throttled to ~15 fps during playback while the playhead continues to update every tick
 
-**Video Playback & Timeline**
-9. Synchronized video playback window (ffpyplayer) with timeline scrubbing
-10. Arrow key frame stepping and spacebar play/pause on timeline; keys work when video window is focused
-11. Seek bar in video window syncs timeline playhead
-12. "Show waveform" checkbox in Options bar to hide/show funscript track
-13. Timeline ruler minor tick subdivisions and two-level grid
-14. Timeline zoom extended to support long videos (>15 min)
-15. Auto-load matching video file when opening events for same source
+## Bug Fixes
 
-**Dark Mode**
-16. Dark/light mode toggle button in main toolbar (sv_ttk theme)
-17. Dark mode preference is now persisted in config and restored on next launch
-
-### Dependencies added
-- `ffpyplayer>=4.3.0`
-- `Pillow>=10.0.0`
-- `sv-ttk>=2.6.0`
+1. **Video open error shown in UI** — errors when opening a video file are caught and displayed in the status label instead of crashing silently
+2. **Events auto-load no longer crashes on empty YAML** — loading an events file that has no `events` key or is completely empty no longer raises an `AttributeError`; event file path and dirty state are also now correctly set even when the events list is empty

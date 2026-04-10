@@ -2008,6 +2008,13 @@ class VideoPanel(ttk.Frame):
         self._seek_updating = False   # suppress seek callback while programmatically moving bar
         self._on_playback_tick = None   # Callable[[float], None] set by dialog
         self._on_duration_known = None  # Callable[[float], None] fired with duration_ms
+        # Performance / UX
+        self._canvas_item = None      # persistent canvas image item (avoids delete+create per frame)
+        self._cw: int = 640           # cached canvas width (updated via <Configure>)
+        self._ch: int = 360           # cached canvas height
+        self._meta_cached = False     # True once duration/fps have been read from metadata
+        self._label_tick: int = 0     # frame counter for throttling time-label updates
+        self._seek_muted = False      # True while muted for a paused-seek decode
 
         # Pack order matters: BOTTOM items stack upward, canvas fills remaining space.
         # Controls bar (bottom-most)
@@ -2056,6 +2063,7 @@ class VideoPanel(ttk.Frame):
             widget.bind('<Shift-Control-Left>',  lambda e: self.on_seek_ms(-30_000) if self.on_seek_ms else None)
             widget.bind('<Shift-Control-Right>', lambda e: self.on_seek_ms(30_000)  if self.on_seek_ms else None)
         self._canvas.bind('<Button-1>', lambda e: self._canvas.focus_set())
+        self._canvas.bind('<Configure>', self._on_canvas_resize)
 
     # ------------------------------------------------------------------
     # Public API
@@ -2071,8 +2079,15 @@ class VideoPanel(ttk.Frame):
             return False
         self.stop()
         self._vid_size = (0, 0)
-        self._player = FfPlayer(path, loglevel='error', ff_opts={'paused': True})
-        self._player.set_volume(self._vol_var.get() / 100.0)
+        self._meta_cached = False
+        self._seek_muted = False
+        try:
+            self._player = FfPlayer(path, loglevel='error', ff_opts={'paused': True})
+            self._player.set_volume(self._vol_var.get() / 100.0)
+        except Exception as e:
+            self._status_label.config(text=f'Could not open video: {e}')
+            self._player = None
+            return False
         self._playing = False
         self._play_btn.config(text='\u25b6 Play')
         import os
@@ -2089,7 +2104,11 @@ class VideoPanel(ttk.Frame):
         if self._playing:
             self.after(80, self._grab_one_frame)
         else:
-            # Paused: briefly unpause so ffpyplayer decodes the frame, then re-pause
+            # Paused: briefly unpause so ffpyplayer decodes the frame, then re-pause.
+            # Mute first to suppress the audio blip during the decode window.
+            if not self._seek_muted:
+                self._seek_muted = True
+                self._player.set_volume(0)
             self._player.set_pause(False)
             self.after(80, self._grab_paused_frame)
 
@@ -2106,6 +2125,10 @@ class VideoPanel(ttk.Frame):
             self._player.set_pause(False)
             self._playing = True
             self._play_btn.config(text='\u23f8 Pause')
+            # Ensure volume is restored if play is pressed mid-seek-mute
+            if self._seek_muted:
+                self._seek_muted = False
+                self._player.set_volume(self._vol_var.get() / 100.0)
             self._start_poll()
 
     def stop(self):
@@ -2130,6 +2153,14 @@ class VideoPanel(ttk.Frame):
         if self._player is not None:
             self._player.set_volume(self._vol_var.get() / 100.0)
 
+    def _on_canvas_resize(self, event):
+        """Canvas resized — invalidate the cached item so next frame repositions it."""
+        self._cw = event.width
+        self._ch = event.height
+        if self._canvas_item is not None:
+            self._canvas.delete(self._canvas_item)
+            self._canvas_item = None
+
     def _grab_one_frame(self):
         """Grab and display a single frame (during playback seek)."""
         if self._player is None:
@@ -2138,18 +2169,26 @@ class VideoPanel(ttk.Frame):
         if frame is not None:
             img, pts = frame
             self._display_frame(img)
-            self._update_time_label()
+            self._update_time_label(force=True)
 
     def _grab_paused_frame(self):
         """Grab a frame after seeking while paused; re-pause once a frame arrives."""
         if self._player is None or self._playing:
+            # If somehow still muted (e.g. play was pressed mid-seek), unmute now
+            if self._seek_muted and self._player is not None:
+                self._seek_muted = False
+                self._player.set_volume(self._vol_var.get() / 100.0)
             return
         frame, val = self._player.get_frame()
         if frame is not None:
             img, pts = frame
             self._display_frame(img)
-            self._update_time_label()
+            self._update_time_label(force=True)
             self._player.set_pause(True)
+            # Restore volume now that we're paused again
+            if self._seek_muted:
+                self._seek_muted = False
+                self._player.set_volume(self._vol_var.get() / 100.0)
         else:
             # Frame not decoded yet — keep unpaused a little longer and retry
             self.after(30, self._grab_paused_frame)
@@ -2204,47 +2243,52 @@ class VideoPanel(ttk.Frame):
             w, h = self._vid_size
             if w == 0 or h == 0:
                 return
+            cw, ch = self._cw or 640, self._ch or 360
             data = bytes(img.to_bytearray()[0])
             pil_img = PilImage.frombuffer('RGB', (w, h), data, 'raw', 'RGB', 0, 1)
-            cw = self._canvas.winfo_width() or 640
-            ch = self._canvas.winfo_height() or 360
             pil_img.thumbnail((cw, ch), PilImage.NEAREST)
             self._photo = ImageTk.PhotoImage(pil_img)
-            self._canvas.delete('frame')
-            self._canvas.create_image(
-                cw // 2, ch // 2, image=self._photo, anchor='center', tags='frame')
+            if self._canvas_item is None:
+                self._canvas_item = self._canvas.create_image(
+                    cw // 2, ch // 2, image=self._photo, anchor='center', tags='frame')
+            else:
+                self._canvas.itemconfig(self._canvas_item, image=self._photo)
         except Exception:
             pass
 
-    def _update_time_label(self):
+    def _update_time_label(self, force: bool = False):
         if self._player is None:
             return
         try:
             cur_s = max(0.0, self._player.get_pts())
-            meta = self._player.get_metadata()
-            length = int(meta.get('duration', 0) or 0)
-            def fmt(s): return f'{int(s) // 60}:{int(s) % 60:02d}'
-            self._time_label.config(text=f'{fmt(cur_s)} / {fmt(length)}')
 
-            # Update fps from metadata
-            fr = meta.get('frame_rate')
-            if isinstance(fr, (tuple, list)) and len(fr) == 2 and fr[1] > 0:
-                self._fps = fr[0] / fr[1]
-            elif isinstance(fr, (int, float)) and float(fr) > 0:
-                self._fps = float(fr)
+            # Cache static metadata (duration, fps) on first successful read
+            if not self._meta_cached:
+                meta = self._player.get_metadata()
+                length = int(meta.get('duration', 0) or 0)
+                if length > 0:
+                    self._duration_s = float(length)
+                    if self._seek_bar.cget('to') != float(length):
+                        self._seek_bar.config(to=float(length))
+                    fr = meta.get('frame_rate')
+                    if isinstance(fr, (tuple, list)) and len(fr) == 2 and fr[1] > 0:
+                        self._fps = fr[0] / fr[1]
+                    elif isinstance(fr, (int, float)) and float(fr) > 0:
+                        self._fps = float(fr)
+                    self._meta_cached = True
+                    if self._on_duration_known is not None:
+                        self._on_duration_known(self._duration_s * 1000.0)
+            length = int(self._duration_s)
 
-            # Update seek bar range and position
-            if length > 0:
-                if self._seek_bar.cget('to') != float(length):
-                    self._seek_bar.config(to=float(length))
-                self._duration_s = float(length)
-                if not self._seek_updating:
+            # Throttle UI updates to ~5 fps during poll loop; always update on force
+            self._label_tick += 1
+            if force or self._label_tick % 6 == 0:
+                def fmt(s): return f'{int(s) // 60}:{int(s) % 60:02d}'
+                self._time_label.config(text=f'{fmt(cur_s)} / {fmt(length)}')
+                if length > 0 and not self._seek_updating:
                     self._seek_updating = True
                     self._seek_var.set(cur_s)
                     self._seek_updating = False
-
-            if length > 0 and self._on_duration_known is not None:
-                self._on_duration_known(float(length) * 1000.0)
         except Exception:
             pass
 
@@ -2257,6 +2301,9 @@ class VideoPanel(ttk.Frame):
         if self._on_playback_tick is not None:
             self._on_playback_tick(pos_s * 1000.0)
         if not self._playing:
+            if not self._seek_muted:
+                self._seek_muted = True
+                self._player.set_volume(0)
             self._player.set_pause(False)
             self.after(80, self._grab_paused_frame)
 
@@ -2448,6 +2495,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self._video_win.withdraw()  # hidden by default
         self._video_driving = False       # True while video tick is updating playhead
         self._seek_settling_count = 0     # >0 while a seek is still settling; suppresses video tick
+        self._video_tick_count = 0        # frame counter for throttling timeline redraws
 
         # Wire playhead ↔ video sync
         self.timeline_panel.on_playhead_change = self._on_playhead_change
@@ -2636,11 +2684,14 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         """Video playback position update (~30 fps) → drive timeline playhead."""
         if self._seek_settling_count > 0:
             return  # seek still settling; don't overwrite the playhead
+        self._video_tick_count += 1
         self._video_driving = True
         try:
             self.timeline_panel._playhead_ms = ms
             self.timeline_panel._update_playhead_label()
-            self.timeline_panel.redraw()
+            # Redraw timeline at ~15 fps (every other video tick) to reduce canvas overhead
+            if self._video_tick_count % 2 == 0:
+                self.timeline_panel.redraw()
         finally:
             self._video_driving = False
 
@@ -2689,19 +2740,18 @@ class CustomEventsBuilderDialog(tk.Toplevel):
 
         try:
             with open(events_file_path, 'r') as f:
-                data = yaml.safe_load(f)
-            events = data.get('events', [])
-            if events is not None:
-                self.timeline_panel.load_events_from_yaml(events)
-                self.event_file_path = events_file_path
-                self.event_file_var.set(str(self.event_file_path))
-                self.set_dirty(False)
-                if events:
-                    self.status_label.config(
-                        text=f"Auto-loaded {len(events)} events from {events_file_path.name}")
-                else:
-                    self.status_label.config(
-                        text=f"Auto-loaded empty event file: {events_file_path.name}")
+                data = yaml.safe_load(f) or {}
+            events = data.get('events') or []
+            self.timeline_panel.load_events_from_yaml(events)
+            self.event_file_path = events_file_path
+            self.event_file_var.set(str(self.event_file_path))
+            self.set_dirty(False)
+            if events:
+                self.status_label.config(
+                    text=f"Auto-loaded {len(events)} events from {events_file_path.name}")
+            else:
+                self.status_label.config(
+                    text=f"Auto-loaded empty event file: {events_file_path.name}")
         except Exception:
             self.status_label.config(text="Ready. Could not auto-load events file.")
 
@@ -2944,8 +2994,8 @@ class CustomEventsBuilderDialog(tk.Toplevel):
 
         try:
             with open(file_path, 'r') as f:
-                data = yaml.safe_load(f)
-            events = data.get('events', [])
+                data = yaml.safe_load(f) or {}
+            events = data.get('events') or []
             self.timeline_panel.load_events_from_yaml(events)
             self.event_file_path = Path(file_path)
             self.event_file_var.set(str(self.event_file_path))
