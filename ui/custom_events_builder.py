@@ -2848,7 +2848,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         try:
             with open(file_path, 'r') as f:
                 data = yaml.safe_load(f)
-            events = data.get('events', [])
+            events = data.get('events') or []
             self.timeline_panel.load_events_from_yaml(events)
             self.event_file_path = Path(file_path)
             self.event_file_var.set(str(self.event_file_path))
