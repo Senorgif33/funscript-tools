@@ -1991,24 +1991,27 @@ _VIDEO_POLL_MS = 33  # ~30 fps polling interval for video playback
 
 class VideoPanel(ttk.Frame):
     """
-    Embeds a video player into a Tkinter Frame using ffpyplayer + Pillow.
-    No external software required — ffpyplayer bundles FFmpeg wheels.
-    Install: pip install ffpyplayer Pillow
+    Embeds a video player into a Tkinter Frame using python-vlc.
+    VLC renders directly to the canvas HWND — no frame transfer needed.
+    Seeking and play/pause are near-instant.
     """
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
-        self._player = None       # ffpyplayer MediaPlayer instance
-        self._photo = None        # PhotoImage ref kept to prevent GC
-        self._poll_id = None      # after() handle for playback poll loop
-        self._grab_id = None      # after() handle for one-shot frame grabs
+        # VLC objects (created once on first load)
+        self._vlc_inst = None     # vlc.Instance
+        self._vlc_mp = None       # vlc.MediaPlayer
+        # Playback state
+        self._poll_id = None
         self._playing = False
-        self._vid_size = (0, 0)   # (w, h) populated from get_metadata()
         self._fps: float = 30.0
         self._duration_s: float = 0.0
         self._seek_updating = False   # suppress seek callback while programmatically moving bar
         self._on_playback_tick = None   # Callable[[float], None] set by dialog
         self._on_duration_known = None  # Callable[[float], None] fired with duration_ms
+        self._meta_cached = False
+        self._label_tick: int = 0
+        self._time_show_remaining = False   # toggled by clicking the time label
 
         # Pack order matters: BOTTOM items stack upward, canvas fills remaining space.
         # Controls bar (bottom-most)
@@ -2024,8 +2027,9 @@ class VideoPanel(ttk.Frame):
                   variable=self._vol_var, length=80,
                   command=self._on_vol_change).pack(side=tk.LEFT, padx=(0, 8))
 
-        self._time_label = ttk.Label(ctrl, text='0:00 / 0:00', width=14)
+        self._time_label = ttk.Label(ctrl, text='0:00 / 0:00', width=16, cursor='hand2')
         self._time_label.pack(side=tk.LEFT)
+        self._time_label.bind('<Button-1>', self._toggle_time_mode)
 
         self._status_label = ttk.Label(ctrl, text='No video loaded', foreground='gray')
         self._status_label.pack(side=tk.LEFT, padx=8)
@@ -2037,6 +2041,8 @@ class VideoPanel(ttk.Frame):
         self._seek_bar = ttk.Scale(seek_frame, from_=0.0, to=1.0, orient='horizontal',
                                    variable=self._seek_var, command=self._on_seek_bar)
         self._seek_bar.pack(fill=tk.X)
+        self._seek_bar.bind('<Button-1>', self._on_seek_click)
+        self._seek_bar.bind('<B1-Motion>', self._on_seek_click)
 
         # Video canvas (fills remaining space above seek bar)
         self._canvas = tk.Canvas(self, bg='black')
@@ -2065,99 +2071,164 @@ class VideoPanel(ttk.Frame):
     def load(self, path: str) -> bool:
         """Load a video file. Returns True on success."""
         try:
-            from ffpyplayer.player import MediaPlayer as FfPlayer
+            import vlc as _vlc
         except ImportError:
             self._status_label.config(
-                text='ffpyplayer not installed — run: pip install ffpyplayer Pillow')
+                text='python-vlc not installed — run: pip install python-vlc')
             return False
-        self.stop()
-        self._vid_size = (0, 0)
-        self._player = FfPlayer(path, loglevel='error', ff_opts={'paused': True})
-        self._player.set_volume(self._vol_var.get() / 100.0)
+        # Create VLC instance once.
+        # --avcodec-hw=none  : disable FFmpeg hardware video decoding
+        # --vout=wingdi       : force Windows GDI video output (avoids D3D9/D3D11
+        #                       renderer crashes for certain encoded files)
+        if self._vlc_inst is None:
+            self._vlc_inst = _vlc.Instance(
+                '--no-xlib --quiet --no-video-title-show '
+                '--avcodec-hw=none --vout=wingdi')
+            self._vlc_mp = self._vlc_inst.media_player_new()
+            em = self._vlc_mp.event_manager()
+            em.event_attach(_vlc.EventType.MediaPlayerEndReached,
+                            lambda _e: self.after(0, self._on_eof))
+        # Reset state
         self._playing = False
         self._play_btn.config(text='\u25b6 Play')
+        self._meta_cached = False
+        self._duration_s = 0.0
         import os
-        self._status_label.config(text=os.path.basename(path))
-        # Grab first frame after a short delay (player needs time to initialise)
-        self._grab_id = self.after(200, self._grab_one_frame)
+        self._status_label.config(text=f'Loading {os.path.basename(path)}\u2026')
+        media = self._vlc_inst.media_new(path)
+        # Disable hardware video decoding per-media as a belt-and-suspenders
+        # measure in case the Instance was already created without the flag.
+        media.add_option(':avcodec-hw=none')
+        self._vlc_mp.set_media(media)
+        # Ensure the canvas HWND is realized before passing to VLC.
+        # The video window may be withdrawn; update_idletasks forces HWND creation.
+        self._canvas.winfo_toplevel().update_idletasks()
+        self._vlc_mp.set_hwnd(self._canvas.winfo_id())
+        self._vlc_mp.audio_set_volume(int(self._vol_var.get()))
+        # NOTE: parse_with_options is intentionally omitted — it triggers an
+        # async VLC thread that races with play() and can crash for large files.
+        # Duration/fps are obtained via the poll loop once play() starts.
+        self._vlc_mp.play()
+        self.after(300, self._pause_after_first_frame)
+        self._start_poll()
         return True
 
     def seek(self, ms: float):
-        """Seek to position in milliseconds and display that frame."""
-        if self._player is None:
+        """Seek to position in milliseconds."""
+        if self._vlc_mp is None:
             return
-        self._player.seek(ms / 1000.0, relative=False)
-        if self._playing:
-            self._grab_id = self.after(80, self._grab_one_frame)
-        else:
-            # Paused: briefly unpause so ffpyplayer decodes the frame, then re-pause
-            self._player.set_pause(False)
-            self._grab_id = self.after(80, self._grab_paused_frame)
+        self._vlc_mp.set_time(max(0, int(ms)))
+        # Immediately update UI so timeline stays in sync
+        self._update_time_label_from_ms(ms)
+        if self._on_playback_tick is not None:
+            self._on_playback_tick(float(ms))
 
     def toggle_play(self):
         """Toggle between play and pause."""
-        if self._player is None:
+        if self._vlc_mp is None:
             return
         if self._playing:
-            self._player.set_pause(True)
             self._playing = False
             self._play_btn.config(text='\u25b6 Play')
-            self._stop_poll()
+            self._vlc_mp.pause()
         else:
-            self._player.set_pause(False)
             self._playing = True
             self._play_btn.config(text='\u23f8 Pause')
-            self._start_poll()
+            self._vlc_mp.play()
 
     def stop(self):
-        """Stop playback and release player resources."""
+        """Stop playback and release VLC media."""
         self._stop_poll()
         self._playing = False
         if hasattr(self, '_play_btn'):
             self._play_btn.config(text='\u25b6 Play')
-        if self._player is not None:
+        if self._vlc_mp is not None:
             try:
-                self._player.close_player()
+                self._vlc_mp.stop()
             except Exception:
                 pass
-            del self._player
-            self._player = None
-            import gc
-            gc.collect()  # encourage CPython to free the C-level player before SDL is reused
+
+    def destroy(self):
+        """Ensure VLC resources are released before widget destruction."""
+        self.stop()
+        if self._vlc_mp is not None:
+            try:
+                self._vlc_mp.release()
+            except Exception:
+                pass
+            self._vlc_mp = None
+        if self._vlc_inst is not None:
+            try:
+                self._vlc_inst.release()
+            except Exception:
+                pass
+            self._vlc_inst = None
+        super().destroy()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _pause_after_first_frame(self):
+        """Called 300 ms after load() — pause VLC and read metadata."""
+        if self._vlc_mp is None:
+            return
+        if not self._playing:
+            self._vlc_mp.pause()
+        if not self._meta_cached:
+            self._read_metadata()
+
+    def _read_metadata(self):
+        """Read duration and fps from VLC after media is parsed."""
+        if self._vlc_mp is None:
+            return
+        try:
+            dur_ms = self._vlc_mp.get_length()
+            if dur_ms > 0 and not self._meta_cached:
+                self._duration_s = dur_ms / 1000.0
+                self._seek_bar.config(to=float(self._duration_s))
+                self._meta_cached = True
+                # Use get_fps() rather than tracks_get() — the latter returns
+                # raw ctypes pointers whose .contents dereference can segfault
+                # if VLC frees the track structs concurrently.
+                fps = self._vlc_mp.get_fps()
+                if fps > 0:
+                    self._fps = fps
+                if self._on_duration_known is not None:
+                    self._on_duration_known(float(dur_ms))
+                # Update status to just the filename
+                import os
+                try:
+                    path = self._vlc_mp.get_media().get_mrl()
+                    # mrl may be file:///... — extract base name
+                    from urllib.parse import unquote
+                    name = os.path.basename(unquote(path.replace('file:///', '').replace('file://', '')))
+                    self._status_label.config(text=name)
+                except Exception:
+                    self._status_label.config(text='Loaded')
+        except Exception:
+            pass
+
+    def _on_eof(self):
+        """VLC end-of-file — called on Tkinter thread via after(0)."""
+        self._playing = False
+        if hasattr(self, '_play_btn'):
+            self._play_btn.config(text='\u25b6 Play')
+
     def _on_vol_change(self, *_):
-        if self._player is not None:
-            self._player.set_volume(self._vol_var.get() / 100.0)
+        if self._vlc_mp is not None:
+            try:
+                self._vlc_mp.audio_set_volume(int(self._vol_var.get()))
+            except Exception:
+                pass
 
-    def _grab_one_frame(self):
-        """Grab and display a single frame (during playback seek)."""
-        self._grab_id = None
-        if self._player is None:
-            return
-        frame, val = self._player.get_frame()
-        if frame is not None:
-            img, pts = frame
-            self._display_frame(img)
-            self._update_time_label()
-
-    def _grab_paused_frame(self):
-        """Grab a frame after seeking while paused; re-pause once a frame arrives."""
-        self._grab_id = None
-        if self._player is None or self._playing:
-            return
-        frame, val = self._player.get_frame()
-        if frame is not None:
-            img, pts = frame
-            self._display_frame(img)
-            self._update_time_label()
-            self._player.set_pause(True)
-        else:
-            # Frame not decoded yet — keep unpaused a little longer and retry
-            self._grab_id = self.after(30, self._grab_paused_frame)
+    def _on_canvas_resize(self, event):
+        """Canvas resized — re-attach VLC HWND so it fills the new size."""
+        if self._vlc_mp is not None:
+            try:
+                self._vlc_mp.set_hwnd(self._canvas.winfo_id())
+            except Exception:
+                pass
 
     def _start_poll(self):
         self._stop_poll()
@@ -2170,86 +2241,59 @@ class VideoPanel(ttk.Frame):
             except Exception:
                 pass
             self._poll_id = None
-        if self._grab_id is not None:
-            try:
-                self.after_cancel(self._grab_id)
-            except Exception:
-                pass
-            self._grab_id = None
 
     def _poll_loop(self):
-        """Called at ~30 fps during playback to update the displayed frame."""
-        if self._player is None or not self._playing:
-            return
-        frame, val = self._player.get_frame()
-        if val == 'eof':
-            self._playing = False
-            self._play_btn.config(text='\u25b6 Play')
-            self._poll_id = None
-            return
-        if frame is not None:
-            img, pts = frame
-            self._display_frame(img)
-            self._update_time_label()
-            if self._on_playback_tick is not None:
-                pts_ms = self._player.get_pts() * 1000.0
-                if pts_ms >= 0:
-                    self._on_playback_tick(pts_ms)
-        # Respect ffpyplayer's suggested delay but cap at POLL_MS
-        if isinstance(val, float) and val > 0:
-            delay = min(int(val * 1000), _VIDEO_POLL_MS)
-        else:
-            delay = _VIDEO_POLL_MS
-        self._poll_id = self.after(delay, self._poll_loop)
+        """Poll VLC position and update UI — no frame transfer needed."""
+        if self._vlc_mp is not None:
+            # Check for VLC error state
+            try:
+                import vlc as _vlc
+                state = self._vlc_mp.get_state()
+                if state == _vlc.State.Error:
+                    self._status_label.config(
+                        text='Video error — try a different file', foreground='red')
+                    self._playing = False
+                    if hasattr(self, '_play_btn'):
+                        self._play_btn.config(text='\u25b6 Play')
+                    self._poll_id = None
+                    return
+            except Exception:
+                pass
 
-    def _display_frame(self, img):
-        """Convert ffpyplayer Image to PhotoImage and draw on canvas."""
+            # Try to read metadata if not yet cached
+            if not self._meta_cached:
+                self._read_metadata()
+
+            if self._playing:
+                ms = self._vlc_mp.get_time()
+                if ms >= 0:
+                    self._update_time_label_from_ms(float(ms))
+                    if self._on_playback_tick is not None:
+                        self._on_playback_tick(float(ms))
+
+        self._poll_id = self.after(_VIDEO_POLL_MS, self._poll_loop)
+
+    def _toggle_time_mode(self, *_):
+        """Toggle between elapsed and remaining time display."""
+        self._time_show_remaining = not self._time_show_remaining
+        self._label_tick = 0  # force immediate redraw
+        if self._vlc_mp is not None:
+            self._update_time_label_from_ms(float(max(0, self._vlc_mp.get_time())))
+
+    def _update_time_label_from_ms(self, ms: float):
+        """Update time label and seek bar from position in milliseconds (throttled)."""
         try:
-            from PIL import Image as PilImage, ImageTk
-        except ImportError:
-            return
-        try:
-            if self._vid_size == (0, 0) and self._player is not None:
-                meta = self._player.get_metadata()
-                self._vid_size = meta.get('src_vid_size', (0, 0))
-            w, h = self._vid_size
-            if w == 0 or h == 0:
-                return
-            data = bytes(img.to_bytearray()[0])
-            pil_img = PilImage.frombuffer('RGB', (w, h), data, 'raw', 'RGB', 0, 1)
-            cw = self._canvas.winfo_width() or 640
-            ch = self._canvas.winfo_height() or 360
-            pil_img.thumbnail((cw, ch), PilImage.NEAREST)
-            self._photo = ImageTk.PhotoImage(pil_img)
-            self._canvas.delete('frame')
-            self._canvas.create_image(
-                cw // 2, ch // 2, image=self._photo, anchor='center', tags='frame')
-        except Exception:
-            pass
-
-    def _update_time_label(self):
-        if self._player is None:
-            return
-        try:
-            cur_s = max(0.0, self._player.get_pts())
-            meta = self._player.get_metadata()
-            length = int(meta.get('duration', 0) or 0)
-            def fmt(s): return f'{int(s) // 60}:{int(s) % 60:02d}'
-            self._time_label.config(text=f'{fmt(cur_s)} / {fmt(length)}')
-
-            # Update fps from metadata
-            fr = meta.get('frame_rate')
-            if isinstance(fr, (tuple, list)) and len(fr) == 2 and fr[1] > 0:
-                self._fps = fr[0] / fr[1]
-            elif isinstance(fr, (int, float)) and float(fr) > 0:
-                self._fps = float(fr)
-
-            # Update seek bar range and position
-            if length > 0:
-                if self._seek_bar.cget('to') != float(length):
-                    self._seek_bar.config(to=float(length))
-                self._duration_s = float(length)
-                if not self._seek_updating:
+            cur_s = max(0.0, ms / 1000.0)
+            length = self._duration_s
+            self._label_tick += 1
+            if self._label_tick % 6 == 0 or not self._playing:
+                def fmt(s): return f'{int(s) // 60}:{int(s) % 60:02d}'
+                if self._time_show_remaining and length > 0:
+                    remaining = max(0.0, length - cur_s)
+                    self._time_label.config(text=f'-{fmt(remaining)} / {fmt(length)}')
+                else:
+                    self._time_label.config(text=f'{fmt(cur_s)} / {fmt(length)}')
+                if length > 0 and not self._seek_updating:
                     self._seek_updating = True
                     self._seek_var.set(cur_s)
                     self._seek_updating = False
@@ -2259,18 +2303,27 @@ class VideoPanel(ttk.Frame):
         except Exception:
             pass
 
+    def _on_seek_click(self, event):
+        """Click or drag on the seek bar — jump directly to that position."""
+        if self._duration_s <= 0 or self._vlc_mp is None:
+            return 'break'
+        w = self._seek_bar.winfo_width()
+        if w <= 0:
+            return 'break'
+        frac = max(0.0, min(1.0, event.x / w))
+        pos_s = frac * self._duration_s
+        self._seek_bar.set(pos_s)   # fires _on_seek_bar via command callback
+        return 'break'              # suppress default ttk.Scale step behaviour
+
     def _on_seek_bar(self, val):
-        """User moved the seek bar."""
-        if self._seek_updating or self._player is None:
+        """Seek bar value changed (by poll update or _on_seek_click)."""
+        if self._seek_updating or self._vlc_mp is None:
             return
         pos_s = float(val)
-        self._player.seek(pos_s, relative=False)
+        self._vlc_mp.set_time(max(0, int(pos_s * 1000)))
+        self._update_time_label_from_ms(pos_s * 1000.0)
         if self._on_playback_tick is not None:
             self._on_playback_tick(pos_s * 1000.0)
-        if not self._playing:
-            self._player.set_pause(False)
-            self.after(80, self._grab_paused_frame)
-
 
 class CustomEventsBuilderDialog(tk.Toplevel):
     """
@@ -2454,14 +2507,15 @@ class CustomEventsBuilderDialog(tk.Toplevel):
 
         # --- Floating video window (hidden until toggled) ---
         self._video_win = tk.Toplevel(self)
+        self._video_win.withdraw()  # hide immediately — before geometry/content, avoids WM focus-steal on Windows
         self._video_win.title('Video')
         self._video_win.geometry('800x500')
         self._video_win.protocol('WM_DELETE_WINDOW', self._on_video_win_close)
         self._video_panel = VideoPanel(self._video_win)
         self._video_panel.pack(fill=tk.BOTH, expand=True)
-        self._video_win.withdraw()  # hidden by default
         self._video_driving = False       # True while video tick is updating playhead
         self._seek_settling_count = 0     # >0 while a seek is still settling; suppresses video tick
+        self._video_tick_count = 0        # counts video ticks; used to throttle timeline redraws
 
         # Wire playhead ↔ video sync
         self.timeline_panel.on_playhead_change = self._on_playhead_change
@@ -2620,8 +2674,11 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             parent=self,
         )
         if path:
-            if self._video_panel.load(path) and not self._video_win.winfo_ismapped():
+            # Show the video window before loading so the canvas HWND is
+            # realized and valid when VLC calls set_hwnd().
+            if not self._video_win.winfo_ismapped():
                 self._toggle_video_panel()
+            self._video_panel.load(path)
 
     def _try_auto_load_video(self):
         """Look for a matching video file in the same directory as the events file."""
@@ -2651,10 +2708,18 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         if self._seek_settling_count > 0:
             return  # seek still settling; don't overwrite the playhead
         self._video_driving = True
+        self._video_tick_count += 1
         try:
             self.timeline_panel._playhead_ms = ms
             self.timeline_panel._update_playhead_label()
-            self.timeline_panel.redraw()
+            # Auto-scroll: page forward when playhead runs off the right edge during playback
+            if self._video_panel._playing:
+                vis = self.timeline_panel._visible_ms()
+                if ms > self.timeline_panel.pan_offset_ms + vis:
+                    self.timeline_panel.pan_offset_ms = max(0.0, ms - vis * 0.2)
+            # Redraw timeline at ~15 fps (every other video tick) to reduce canvas overhead
+            if self._video_tick_count % 2 == 0:
+                self.timeline_panel.redraw()
         finally:
             self._video_driving = False
 
@@ -2719,7 +2784,6 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         except Exception:
             self.status_label.config(text="Ready. Could not auto-load events file.")
 
-        self._try_auto_load_video()
         if self.event_file_path:
             self._try_load_matching_funscript(self.event_file_path)
 
