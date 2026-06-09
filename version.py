@@ -185,9 +185,20 @@ Version information for Restim Funscript Processor
         3. Bulge scales with stroke range (bulge=range/2); narrow side uses
            min_distance_from_center as the narrow/wide ratio
         4. Strokes < 25% range produce no arc so short oscillations stay linear
+2.4.5 - MCB extract events, modulation density fix, and Custom Event Builder improvements:
+        1. Added MCB extract event definitions: mcb_extract, mcb_extract_additive,
+           mcb_extract_4p, mcb_extract_4p_additive (4P e4→e1 upward pull with step_ratio),
+           mcb_extract_4p_smooth, mcb_extract_4p_smooth_additive (smooth climb variant),
+           and corrupt_4p (4P inharmonic drift)
+        2. Fixed modulation waveform accuracy: _ensure_dense_timestamps() pre-inserts interpolated
+           points before applying modulation so waveforms are faithfully represented at any resolution
+        3. Custom Event Builder: Funscript snap mode (default), proportional event block drawing,
+           stable lane layout, waveform downsampling, debounced zoom/pan redraw, VLC seek-bar fixes
+        4. Dark mode: blue info labels use lighter accent color for readability
+        5. Windows build: PyInstaller onefile spec; release package copies exe and docs to versioned folder
 """
 
-__version__ = "2.4.4"
+__version__ = "2.4.5"
 __app_name__ = "Restim Funscript Processor"
 __description__ = "GUI application for processing funscript files for electrostimulation devices"
 __author__ = "Funscript Tools Project"

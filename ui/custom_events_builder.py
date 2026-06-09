@@ -5,6 +5,7 @@ This module provides a user-friendly visual interface for creating and editing
 custom event timelines without requiring manual YAML editing.
 """
 
+import bisect
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import json
@@ -298,6 +299,7 @@ class ParameterPanel(ttk.Frame):
         fg = '#cdd6f4' if dark else '#000000'
         self.steps_text.config(bg=bg, fg=fg, insertbackground=fg)
         self.canvas.config(bg='#1e1e2e' if dark else 'white')
+        self.editing_label.config(foreground='#5bc8f5' if dark else 'blue')
 
     def _on_theme_change(self, dark: bool):
         self._apply_text_theme(dark)
@@ -769,6 +771,7 @@ class CanvasTimelinePanel(ttk.Frame):
 
         # ---- Snap ----
         self._snap_interval_ms: float = 0.0   # 0 = off
+        self._snap_to_funscript: bool = True   # snap to loaded funscript timestamps
         self._snap_target_ms: Optional[float] = None  # active snap point during drag
 
         # ---- Frame step (updated from video fps when video is loaded) ----
@@ -776,11 +779,15 @@ class CanvasTimelinePanel(ttk.Frame):
 
         # ---- Funscript waveform overlay ----
         self._funscript_actions: List[Dict] = []   # [{at: ms, pos: 0-100}, ...]
+        self._funscript_times: List[float] = []    # sorted 'at' values for fast snap lookup
         self.show_funscript: bool = True            # toggled by dialog checkbox
 
         # ---- Undo / Redo ----
         self._history: List[List[Dict]] = []   # snapshots of self.events
         self._history_pos: int = -1            # current position in _history
+
+        # ---- Redraw debounce (used for zoom/pan wheel events) ----
+        self._redraw_id = None  # pending after() id
 
         # ---- Layout cache (rebuilt each redraw) ----
         self._lanes: List[int] = []       # lane index per event (parallel to self.events)
@@ -832,11 +839,12 @@ class CanvasTimelinePanel(ttk.Frame):
         ttk.Separator(tb, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=2)
         ttk.Label(tb, text="Snap:").pack(side=tk.LEFT, padx=(0, 2))
         self._snap_combo = ttk.Combobox(
-            tb, state='readonly', width=5,
-            values=['Off', '0.5s', '1s', '5s', '10s', '30s', '1m'])
-        self._snap_combo.current(0)
+            tb, state='readonly', width=8,
+            values=['Off', 'Funscript', '0.5s', '1s', '5s', '10s', '30s', '1m'])
+        self._snap_combo.current(1)  # default: Funscript
         self._snap_combo.pack(side=tk.LEFT)
         self._snap_combo.bind('<<ComboboxSelected>>', self._on_snap_changed)
+        self._on_snap_changed()  # initialise _snap_to_funscript from default selection
 
         ttk.Separator(tb, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=6, pady=2)
         self._playhead_label = ttk.Label(tb, text="\u25b6 0:00.000", foreground='#cc2222',
@@ -998,6 +1006,7 @@ class CanvasTimelinePanel(ttk.Frame):
         sorted by 'at'.  Pass an empty list to clear the track.
         """
         self._funscript_actions = sorted(actions, key=lambda a: a['at'])
+        self._funscript_times = [float(a['at']) for a in self._funscript_actions]
         self.redraw()
 
     # ------------------------------------------------------------------ #
@@ -1137,8 +1146,8 @@ class CanvasTimelinePanel(ttk.Frame):
             ev = self.events[i]
             start = float(ev['time'])
             dur   = float(ev['params'].get('duration_ms', 0))
-            # Use at least the minimum pixel footprint so short events don't collapse
-            end   = start + max(dur, self.MIN_BLOCK_W * 1000.0 / max(self.zoom, 1.0))
+            # Use actual duration for stable lane layout independent of zoom level
+            end   = start + max(dur, 1.0)
 
             assigned = -1
             for lane_idx, le in enumerate(lane_ends):
@@ -1318,7 +1327,14 @@ class CanvasTimelinePanel(ttk.Frame):
         """Draw all event blocks."""
         for idx in range(len(self.events)):
             ev = self.events[idx]
-            x1, y1, x2, y2 = self._block_rects[idx]
+            x1, y1, _x2_hit, y2 = self._block_rects[idx]
+
+            # Compute the *visual* right edge from the actual duration so blocks
+            # are drawn proportionally correct at any zoom level.  The stored
+            # _block_rects value uses MIN_BLOCK_W for hit-testing only.
+            dur = ev['params'].get('duration_ms', 0)
+            x2 = self._ms_to_x(ev['time'] + dur) if dur > 0 else x1
+            x2 = max(x2, x1 + 2)  # minimum 2 px so events are always visible
 
             # Skip completely off-screen
             if x2 < self.LEFT_MARGIN or x1 > cw:
@@ -1487,6 +1503,16 @@ class CanvasTimelinePanel(ttk.Frame):
         threshold_ms = self.SNAP_THRESHOLD_PX * 1000.0 / max(self.zoom, 0.001)
         candidates: List[float] = []
 
+        if self._snap_to_funscript and self._funscript_times:
+            lo = bisect.bisect_left(self._funscript_times, raw_ms - threshold_ms)
+            hi = bisect.bisect_right(self._funscript_times, raw_ms + threshold_ms)
+            candidates.extend(self._funscript_times[lo:hi])
+            if dur_ms > 0:
+                end_ms = raw_ms + dur_ms
+                lo2 = bisect.bisect_left(self._funscript_times, end_ms - threshold_ms)
+                hi2 = bisect.bisect_right(self._funscript_times, end_ms + threshold_ms)
+                candidates.extend(self._funscript_times[lo2:hi2])
+
         if self._snap_interval_ms > 0:
             # Nearest grid point for the start edge
             candidates.append(round(raw_ms / self._snap_interval_ms) * self._snap_interval_ms)
@@ -1545,6 +1571,11 @@ class CanvasTimelinePanel(ttk.Frame):
         threshold_ms = self.SNAP_THRESHOLD_PX * 1000.0 / max(self.zoom, 0.001)
         candidates: List[float] = []
 
+        if self._snap_to_funscript and self._funscript_times:
+            lo = bisect.bisect_left(self._funscript_times, raw_end_ms - threshold_ms)
+            hi = bisect.bisect_right(self._funscript_times, raw_end_ms + threshold_ms)
+            candidates.extend(self._funscript_times[lo:hi])
+
         if self._snap_interval_ms > 0:
             candidates.append(round(raw_end_ms / self._snap_interval_ms) * self._snap_interval_ms)
 
@@ -1575,6 +1606,11 @@ class CanvasTimelinePanel(ttk.Frame):
         """
         threshold_ms = self.SNAP_THRESHOLD_PX * 1000.0 / max(self.zoom, 0.001)
         candidates: List[float] = []
+
+        if self._snap_to_funscript and self._funscript_times:
+            lo = bisect.bisect_left(self._funscript_times, raw_start_ms - threshold_ms)
+            hi = bisect.bisect_right(self._funscript_times, raw_start_ms + threshold_ms)
+            candidates.extend(self._funscript_times[lo:hi])
 
         if self._snap_interval_ms > 0:
             candidates.append(round(raw_start_ms / self._snap_interval_ms) * self._snap_interval_ms)
@@ -1645,15 +1681,40 @@ class CanvasTimelinePanel(ttk.Frame):
 
         # Collect visible points (include one point on each side for clipping)
         actions = self._funscript_actions
-        pts = []
-        for i, a in enumerate(actions):
+        raw_pts = []
+        for a in actions:
             at = float(a['at'])
             if at < vis_start_ms - 2000 or at > vis_end_ms + 2000:
                 continue
             x = self._ms_to_x(at)
             # pos 0 = bottom, pos 100 = top
             y = y_bottom - 2 - (float(a['pos']) / 100.0) * inner_h
-            pts.append((x, y))
+            raw_pts.append((x, y))
+
+        if len(raw_pts) < 2:
+            return
+
+        # Downsample to at most 2 points per pixel column (min/max per column).
+        # This keeps the polyline bounded at ~2 * canvas_width points regardless
+        # of zoom level, preventing lag on large funscripts when zoomed out.
+        buckets: dict = {}
+        for x, y in raw_pts:
+            col = int(x)
+            if col not in buckets:
+                buckets[col] = [y, y]
+            else:
+                if y < buckets[col][0]:
+                    buckets[col][0] = y
+                if y > buckets[col][1]:
+                    buckets[col][1] = y
+        pts = []
+        for col in sorted(buckets):
+            lo_y, hi_y = buckets[col]
+            if lo_y != hi_y:
+                pts.append((col, hi_y))   # high y = lower position value (top of spike)
+                pts.append((col, lo_y))   # low y  = higher position value (bottom of spike)
+            else:
+                pts.append((col, lo_y))
 
         if len(pts) < 2:
             return
@@ -1674,10 +1735,16 @@ class CanvasTimelinePanel(ttk.Frame):
                                 width=1, smooth=False)
 
     def _on_snap_changed(self, event=None):
-        """Update _snap_interval_ms from the combobox selection."""
-        mapping = {'Off': 0, '0.5s': 500, '1s': 1000, '5s': 5000,
-                   '10s': 10000, '30s': 30000, '1m': 60000}
-        self._snap_interval_ms = float(mapping.get(self._snap_combo.get(), 0))
+        """Update snap state from the combobox selection."""
+        sel = self._snap_combo.get()
+        if sel == 'Funscript':
+            self._snap_to_funscript = True
+            self._snap_interval_ms = 0.0
+        else:
+            self._snap_to_funscript = False
+            mapping = {'Off': 0, '0.5s': 500, '1s': 1000, '5s': 5000,
+                       '10s': 10000, '30s': 30000, '1m': 60000}
+            self._snap_interval_ms = float(mapping.get(sel, 0))
 
     # ------------------------------------------------------------------ #
     # Hit testing                                                          #
@@ -1875,7 +1942,7 @@ class CanvasTimelinePanel(ttk.Frame):
             vis = self._visible_ms()
             delta_ms = (-event.delta / 120.0) * vis * 0.15
             self.pan_offset_ms = max(0.0, self.pan_offset_ms + delta_ms)
-            self.redraw()
+            self._schedule_redraw()
         else:                      # plain scroll → zoom
             factor = 1.2 if event.delta > 0 else (1.0 / 1.2)
             self._zoom_at(factor, float(event.x))
@@ -1884,7 +1951,7 @@ class CanvasTimelinePanel(ttk.Frame):
         if event.state & 0x0004:  # Ctrl → pan
             vis = self._visible_ms()
             self.pan_offset_ms = max(0.0, self.pan_offset_ms - vis * 0.15)
-            self.redraw()
+            self._schedule_redraw()
         else:                      # plain → zoom in
             self._zoom_at(1.2, float(event.x))
 
@@ -1892,9 +1959,19 @@ class CanvasTimelinePanel(ttk.Frame):
         if event.state & 0x0004:  # Ctrl → pan
             vis = self._visible_ms()
             self.pan_offset_ms = max(0.0, self.pan_offset_ms + vis * 0.15)
-            self.redraw()
+            self._schedule_redraw()
         else:                      # plain → zoom out
             self._zoom_at(1.0 / 1.2, float(event.x))
+
+    def _schedule_redraw(self, delay_ms: int = 16):
+        """Debounced redraw — collapses rapid consecutive calls into one repaint."""
+        if self._redraw_id is not None:
+            self.after_cancel(self._redraw_id)
+        self._redraw_id = self.after(delay_ms, self._do_scheduled_redraw)
+
+    def _do_scheduled_redraw(self):
+        self._redraw_id = None
+        self.redraw()
 
     def _zoom_at(self, factor: float, screen_x: float):
         """Apply zoom factor, keeping the time at *screen_x* stationary."""
@@ -1905,7 +1982,7 @@ class CanvasTimelinePanel(ttk.Frame):
             0.0,
             time_at_x - (screen_x - self.LEFT_MARGIN) * 1000.0 / self.zoom
         )
-        self.redraw()
+        self._schedule_redraw()
 
     def _on_rclick(self, event):
         idx, _ = self._hit_test(event.x, event.y)
@@ -2102,6 +2179,14 @@ class VideoPanel(ttk.Frame):
         self._play_btn.config(text='\u25b6 Play')
         self._meta_cached = False
         self._duration_s = 0.0
+        # Reset seek bar to 0 before loading new media.  If the old position
+        # exceeds the new video's duration, ttk.Scale will clamp the value when
+        # to= is updated in _read_metadata and fire _on_seek_bar with the max
+        # value \u2014 seeking VLC straight to EOF and leaving a black screen.
+        self._seek_updating = True
+        self._seek_var.set(0.0)
+        self._seek_bar.config(to=1.0)   # placeholder until real duration is read
+        self._seek_updating = False
         import os
         self._status_label.config(text=f'Loading {os.path.basename(path)}\u2026')
         media = self._vlc_inst.media_new(path)
@@ -2126,11 +2211,13 @@ class VideoPanel(ttk.Frame):
         """Seek to position in milliseconds."""
         if self._vlc_mp is None:
             return
-        self._vlc_mp.set_time(max(0, int(ms)))
-        # Immediately update UI so timeline stays in sync
-        self._update_time_label_from_ms(ms)
+        clamped = max(0, int(ms))
+        if self._duration_s > 0:
+            clamped = min(clamped, int(self._duration_s * 1000))
+        self._vlc_mp.set_time(clamped)
+        self._update_time_label_from_ms(float(clamped))
         if self._on_playback_tick is not None:
-            self._on_playback_tick(float(ms))
+            self._on_playback_tick(float(clamped))
 
     def toggle_play(self):
         """Toggle between play and pause."""
