@@ -34,6 +34,8 @@ import sys
 sys.path.append(str(Path(__file__).parent.parent))
 
 from processing.event_processor import process_events, EventProcessorError
+from processing.chapter_export import ChapterExportOptions
+from processing.event_display import format_event_display_name
 import ui.theme as _theme
 
 
@@ -369,22 +371,6 @@ class ParameterPanel(ttk.Frame):
         self.steps_text.insert('1.0', "Select an event to see what it does...")
         self.steps_text.config(state=tk.DISABLED)
 
-    @staticmethod
-    def format_event_display_name(event_name: str) -> str:
-        """Format event name with category prefix for display"""
-        if event_name.startswith('mcb_'):
-            # MCB - Edge
-            name = event_name.replace('mcb_', '').replace('_', ' ').title()
-            return f"MCB - {name}"
-        elif event_name.startswith('clutch_'):
-            # Clutch - Good Slave
-            name = event_name.replace('clutch_', '').replace('_', ' ').title()
-            return f"Clutch - {name}"
-        else:
-            # General - Edge
-            name = event_name.replace('_', ' ').title()
-            return f"General - {name}"
-
     def load_event_parameters(self, event_name: str, event_definition: Dict[str, Any],
                              current_params: Optional[Dict[str, Any]] = None, event_time_ms: int = 0,
                              event_number: Optional[int] = None):
@@ -405,7 +391,7 @@ class ParameterPanel(ttk.Frame):
         self.param_vars = {}
 
         # Update title with category prefix
-        display_name = self.format_event_display_name(event_name)
+        display_name = format_event_display_name(event_name)
         self.title_label.config(text=f"Parameters: {display_name}")
 
         # Update editing label
@@ -1073,19 +1059,6 @@ class CanvasTimelinePanel(ttk.Frame):
         self.zoom = max(0.1, min(2000.0, canvas_w * 1000.0 / content_ms))
         self.pan_offset_ms = 0.0
         self.redraw()
-
-    @staticmethod
-    def format_event_display_name(event_name: str) -> str:
-        """Format event name with category prefix for display (matches ParameterPanel)."""
-        if event_name.startswith('mcb_'):
-            name = event_name.replace('mcb_', '').replace('_', ' ').title()
-            return f"MCB - {name}"
-        elif event_name.startswith('clutch_'):
-            name = event_name.replace('clutch_', '').replace('_', ' ').title()
-            return f"Clutch - {name}"
-        else:
-            name = event_name.replace('_', ' ').title()
-            return f"General - {name}"
 
     @staticmethod
     def format_time(ms: int) -> str:
@@ -2093,6 +2066,7 @@ class VideoPanel(ttk.Frame):
         self._playing = False
         self._fps: float = 30.0
         self._duration_s: float = 0.0
+        self._video_path: Optional[str] = None
         self._seek_updating = False   # suppress seek callback while programmatically moving bar
         self._on_playback_tick = None   # Callable[[float], None] set by dialog
         self._on_duration_known = None  # Callable[[float], None] fired with duration_ms
@@ -2157,6 +2131,7 @@ class VideoPanel(ttk.Frame):
 
     def load(self, path: str) -> bool:
         """Load a video file. Returns True on success."""
+        self._video_path = path
         try:
             import vlc as _vlc
         except (ImportError, OSError):
@@ -2479,6 +2454,8 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self.backup_var          = tk.BooleanVar(value=True)
         self.headroom_var        = tk.IntVar(value=10)
         self.show_waveform_var   = tk.BooleanVar(value=True)
+        self.chapter_funscript_var = tk.BooleanVar(value=True)
+        self._video_duration_ms    = None
         self.is_dirty            = False
 
         self.setup_ui()
@@ -2652,7 +2629,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             t_ms  = ev['time']
             m, s  = divmod(t_ms // 1000, 60)
             t_str = f"{m}:{s:02d}"
-            name  = CanvasTimelinePanel.format_event_display_name(ev['name'])
+            name  = format_event_display_name(ev['name'])
             dur   = ev['params'].get('duration_ms', 0)
             d_str = f"{dur // 1000}s" if dur else '—'
             iid   = str(i)
@@ -2709,6 +2686,11 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         ttk.Checkbutton(options_frame, text="Show waveform",
                         variable=self.show_waveform_var,
                         command=self._on_waveform_toggle).pack(side=tk.LEFT, padx=(15, 5))
+
+        ttk.Separator(options_frame, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
+        ttk.Label(options_frame, text="Chapters:").pack(side=tk.LEFT)
+        ttk.Checkbutton(options_frame, text="Funscript",
+                        variable=self.chapter_funscript_var).pack(side=tk.LEFT, padx=(4, 0))
 
     def create_action_bar(self):
         """Create action buttons bar."""
@@ -2829,6 +2811,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
 
     def _on_video_duration_known(self, duration_ms: float):
         """Called when the video's duration and fps are read from metadata."""
+        self._video_duration_ms = int(duration_ms)
         if duration_ms > self.timeline_panel.total_ms:
             self.timeline_panel.set_duration(int(duration_ms))
         fps = self._video_panel._fps
@@ -2933,7 +2916,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         )
         self.params_panel.current_event_definition = event_def
         self.current_event_for_params = event_data['name']
-        display_name = CanvasTimelinePanel.format_event_display_name(event_data['name'])
+        display_name = format_event_display_name(event_data['name'])
         self.status_label.config(text=f"Selected #{event_number}: {display_name}")
 
     def on_canvas_event_move(self, idx: int, new_time_ms: int):
@@ -3079,7 +3062,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             self.timeline_panel.selected_index    = new_index
             self.params_panel.editing_label.config(text=f"Editing event #{new_index + 1}")
 
-            display_name = CanvasTimelinePanel.format_event_display_name(event_data['name'])
+            display_name = format_event_display_name(event_data['name'])
             self.status_label.config(
                 text=f"Event #{new_index + 1} updated — {display_name} at {self._fmt_time(new_time)}")
 
@@ -3334,6 +3317,12 @@ class CustomEventsBuilderDialog(tk.Toplevel):
 
         ttk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=5)
 
+    def _get_chapter_export_options(self) -> ChapterExportOptions:
+        return ChapterExportOptions(
+            write_funscript=self.chapter_funscript_var.get(),
+            video_duration_ms=self._video_duration_ms,
+        )
+
     # ------------------------------------------------------------------ #
     # Apply effects / restore backup                                       #
     # ------------------------------------------------------------------ #
@@ -3383,7 +3372,8 @@ class CustomEventsBuilderDialog(tk.Toplevel):
                 self.backup_var.get(),
                 EVENT_DEFINITIONS_PATH,
                 self.headroom_var.get(),
-                self.config
+                self.config,
+                self._get_chapter_export_options(),
             )
             self.after(0, self.on_processing_success, success_message, backup_path)
         except EventProcessorError as e:
