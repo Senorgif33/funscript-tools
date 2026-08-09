@@ -245,9 +245,12 @@ Version information for Restim Funscript Processor
         3. Config: resolve config.json next to frozen exe; deep-copy merge/get; do not discard
            user config on validation warnings; do not bundle config.json in the Windows exe
         4. Timeline hit-test rects stay in sync with events (deferred redraw race)
+2.5.1 - Custom Event Builder timeline drag performance:
+        1. Dialog Configure handler ignores child widget Configure events and only re-applies
+           chrome sashes when the toplevel size actually changes (fixes sluggish timeline drag)
 """
 
-__version__ = "2.5.0"
+__version__ = "2.5.1"
 __app_name__ = "Restim Funscript Processor"
 __description__ = "GUI application for processing funscript files for electrostimulation devices"
 __author__ = "Funscript Tools Project"

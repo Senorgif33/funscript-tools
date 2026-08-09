@@ -2640,6 +2640,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self._chrome_action_h: Optional[int] = None
         self._chrome_ready = False
         self._sash_configure_after: Optional[str] = None
+        self._last_dialog_size: Optional[tuple] = None
 
         # Load event definitions
         try:
@@ -2897,10 +2898,20 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             pass
         return max(800, screen_w - 16), max(600, screen_h - 48)
 
-    def _on_dialog_configure(self, _event=None):
-        """Debounced: re-apply absolute sashes after maximize/restore/resize."""
+    def _on_dialog_configure(self, event=None):
+        """Debounced: re-apply absolute sashes after maximize/restore/resize.
+
+        Ignore Configure events from child widgets (timeline redraws, etc.) —
+        those were causing sash thrashing and sluggish timeline interaction.
+        """
         if not self._chrome_ready:
             return
+        if event is not None and event.widget is not self:
+            return
+        w, h = self.winfo_width(), self.winfo_height()
+        if getattr(self, '_last_dialog_size', None) == (w, h):
+            return
+        self._last_dialog_size = (w, h)
         if self._sash_configure_after is not None:
             try:
                 self.after_cancel(self._sash_configure_after)
