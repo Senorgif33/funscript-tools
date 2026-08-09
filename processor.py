@@ -414,6 +414,28 @@ events:
                 if not beta_prostate_exists:
                     self._save(beta_prostate_funscript, self._get_temp_path("beta-prostate"))
 
+            # Prostate phase-shifted outputs (independent of 3P/4P phase shift)
+            prostate_ps_config = self.params.get('prostate_generation', {}).get('phase_shift', {})
+            if prostate_ps_config.get('enabled', False):
+                self._update_progress(progress_callback, 17, "Generating phase-shifted prostate versions...")
+                print(f"Prostate phase shift enabled: delay={prostate_ps_config.get('delay_percentage')}%")
+                funscripts_to_shift = {}
+                for key in ['alpha-prostate', 'beta-prostate']:
+                    path = self._get_temp_path(key)
+                    if path.exists():
+                        funscripts_to_shift[key] = Funscript.from_file(path)
+                if funscripts_to_shift:
+                    shifted = generate_all_phase_shifted_funscripts(
+                        funscripts_to_shift, main_funscript,
+                        prostate_ps_config.get('delay_percentage', 10.0),
+                        prostate_ps_config.get('min_segment_duration', 0.25)
+                    )
+                    for key, funscript in shifted.items():
+                        self._save(funscript, self._get_temp_path(key))
+                        print(f"  Saved phase-shifted file: {self._get_temp_path(key).name}")
+                else:
+                    print("  Warning: No alpha-prostate/beta-prostate funscripts found to phase-shift")
+
         # Motion Axis Generation (18-19%)
         if self.params.get('positional_axes', {}).get('generate_motion_axis', False):
             self._update_progress(progress_callback, 18, "Generating motion axis files...")
@@ -729,6 +751,14 @@ events:
             beta_temp_path = self._get_temp_path("beta-prostate")
             if beta_temp_path.exists():
                 shutil.copy2(beta_temp_path, self._get_output_path("beta-prostate"))
+
+            # Copy phase-shifted prostate outputs
+            prostate_ps_config = self.params.get('prostate_generation', {}).get('phase_shift', {})
+            if prostate_ps_config.get('enabled', False):
+                for suffix in ['alpha-prostate-2', 'beta-prostate-2']:
+                    temp_path = self._get_temp_path(suffix)
+                    if temp_path.exists():
+                        shutil.copy2(temp_path, self._get_output_path(suffix))
 
         axes_config = self.params.get('positional_axes', {})
 

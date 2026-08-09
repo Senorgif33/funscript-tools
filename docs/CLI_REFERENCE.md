@@ -92,6 +92,8 @@ done
 | `*.beta.funscript` | 2D electrode Y position |
 | `*.alpha-prostate.funscript` | Prostate electrode X |
 | `*.beta-prostate.funscript` | Prostate electrode Y |
+| `*.alpha-prostate-2.funscript` | Phase-shifted prostate electrode X (optional) |
+| `*.beta-prostate-2.funscript` | Phase-shifted prostate electrode Y (optional) |
 | `*.frequency.funscript` | Pulse rate envelope |
 | `*.pulse_frequency.funscript` | Pulse rate by action intensity |
 | `*.volume.funscript` | Amplitude envelope |

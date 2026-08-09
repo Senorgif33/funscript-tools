@@ -43,7 +43,12 @@ DEFAULT_CONFIG = {
         "generate_from_inverted": True,
         "algorithm": "tear-shaped",
         "points_per_second": 25,
-        "min_distance_from_center": 0.5
+        "min_distance_from_center": 0.5,
+        "phase_shift": {
+            "enabled": False,
+            "delay_percentage": 10.0,
+            "min_segment_duration": 0.25
+        }
     },
     "frequency": {
         "pulse_freq_min": 0.40,
@@ -160,7 +165,11 @@ PARAMETER_RANGES = {
     },
     "prostate_generation": {
         "points_per_second": (1, 100),
-        "min_distance_from_center": (0.3, 0.9)
+        "min_distance_from_center": (0.3, 0.9),
+        "phase_shift": {
+            "delay_percentage": (0.0, 100.0),
+            "min_segment_duration": (0.1, 5.0)
+        }
     },
     "frequency": {
         "pulse_freq_min": (0.0, 1.0),
@@ -267,6 +276,17 @@ class ConfigManager:
                         if not (min_val <= value <= max_val):
                             raise ValueError(f"Parameter positional_axes.phase_shift.{param} = {value} is outside valid range [{min_val}, {max_val}]")
                 continue  # Skip normal processing for positional_axes
+
+            # Special handling for nested prostate_generation.phase_shift
+            if section == 'prostate_generation' and 'phase_shift' in params:
+                phase_shift_ranges = params['phase_shift']
+                phase_shift_config = self.config.get('prostate_generation', {}).get('phase_shift', {})
+
+                for param, (min_val, max_val) in phase_shift_ranges.items():
+                    if param in phase_shift_config:
+                        value = phase_shift_config[param]
+                        if not (min_val <= value <= max_val):
+                            raise ValueError(f"Parameter prostate_generation.phase_shift.{param} = {value} is outside valid range [{min_val}, {max_val}]")
 
             for param, range_tuple in params.items():
                 if param not in self.config[section]:

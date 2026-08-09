@@ -1473,6 +1473,12 @@ Enable/disable individual axes and edit curves to customize the motion pattern."
                 config['prostate_generation']['algorithm'] = prostate_config['algorithm']
                 config['prostate_generation']['points_per_second'] = prostate_config['points_per_second']
                 config['prostate_generation']['min_distance_from_center'] = round(prostate_config['min_distance_from_center'], 1)
+                prostate_ps = prostate_config.get('phase_shift', {})
+                config['prostate_generation']['phase_shift'] = {
+                    'enabled': prostate_ps.get('enabled', False),
+                    'delay_percentage': prostate_ps.get('delay_percentage', 10.0),
+                    'min_segment_duration': prostate_ps.get('min_segment_duration', 0.25)
+                }
             except Exception as e:
                 # Log errors if conversion tabs not properly initialized
                 print(f"Error updating conversion tabs config: {e}")

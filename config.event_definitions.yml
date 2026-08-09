@@ -187,7 +187,7 @@ definitions:
           ramp_in_ms: $ramp_up_ms
           mode: additive
       - operation: apply_modulation
-        axis: alpha
+        axis: alpha,alpha-2,alpha-prostate,alpha-prostate-2
         params:
           waveform: sin
           frequency: $stroke_freq
@@ -231,7 +231,7 @@ definitions:
           ramp_in_ms: $ramp_up_ms
           mode: additive
       - operation: apply_linear_change
-        axis: alpha
+        axis: alpha,alpha-2,alpha-prostate,alpha-prostate-2
         params:
           start_value: $stroke_offset
           end_value: $stroke_offset
@@ -239,7 +239,7 @@ definitions:
           ramp_in_ms: $ramp_up_ms
           mode: additive
       - operation: apply_modulation
-        axis: alpha
+        axis: alpha,alpha-2,alpha-prostate,alpha-prostate-2
         params:
           waveform: sin
           frequency: $stroke_freq
@@ -322,7 +322,7 @@ definitions:
           ramp_in_ms: $ramp_up_ms
           mode: additive
       - operation: apply_modulation
-        axis: alpha
+        axis: alpha,alpha-2,alpha-prostate,alpha-prostate-2
         params:
           waveform: sin
           frequency: $stroke_freq
@@ -366,7 +366,7 @@ definitions:
           ramp_in_ms: $ramp_up_ms
           mode: additive
       - operation: apply_modulation
-        axis: alpha
+        axis: alpha,alpha-2,alpha-prostate,alpha-prostate-2
         params:
           waveform: sin
           frequency: $stroke_freq
@@ -472,7 +472,7 @@ definitions:
           ramp_in_ms: $ramp_up_ms
           mode: additive
       - operation: apply_modulation
-        axis: alpha
+        axis: alpha,alpha-2,alpha-prostate,alpha-prostate-2
         params:
           waveform: sin
           frequency: $stroke_freq
@@ -872,7 +872,7 @@ definitions:
 
       # Alpha modulation (uses edgeCtrl with trill in SC)
       - operation: apply_modulation
-        axis: alpha
+        axis: alpha,alpha-2,alpha-prostate,alpha-prostate-2
         params:
           waveform: sin
           frequency: $alpha_freq
@@ -884,7 +884,7 @@ definitions:
           mode: additive
       # Beta modulation 
       - operation: apply_modulation
-        axis: beta
+        axis: beta,beta-2,beta-prostate,beta-prostate-2
         params:
           waveform: sin
           frequency: $beta_freq
@@ -925,7 +925,7 @@ definitions:
 
       # Alpha modulation with bias
       - operation: apply_modulation
-        axis: alpha
+        axis: alpha,alpha-2,alpha-prostate,alpha-prostate-2
         params:
           waveform: sin
           frequency: $alpha_freq
@@ -967,7 +967,7 @@ definitions:
       # Alpha: N=1.0, L=0.25 — center 0.625, half-range 0.375
       # phase=180 so wave starts at +1 (N pole) at t=0
       - operation: apply_modulation
-        axis: alpha
+        axis: alpha,alpha-2,alpha-prostate,alpha-prostate-2
         params:
           waveform: triangle
           frequency: $switch_freq
@@ -982,7 +982,7 @@ definitions:
       # Beta: N=0.5, L=0.933 — center 0.717, half-range 0.217
       # phase=0 so wave starts at -1 → beta=0.5 (N pole) when alpha is at N
       - operation: apply_modulation
-        axis: beta
+        axis: beta,beta-2,beta-prostate,beta-prostate-2
         params:
           waveform: triangle
           frequency: $switch_freq
@@ -1020,7 +1020,7 @@ definitions:
           mode: overwrite
 
       - operation: apply_modulation
-        axis: alpha
+        axis: alpha,alpha-2,alpha-prostate,alpha-prostate-2
         params:
           waveform: triangle
           frequency: $switch_freq
@@ -1033,7 +1033,7 @@ definitions:
           mode: additive
 
       - operation: apply_modulation
-        axis: beta
+        axis: beta,beta-2,beta-prostate,beta-prostate-2
         params:
           waveform: triangle
           frequency: $switch_freq

@@ -49,6 +49,10 @@ class ConversionTabs:
         self.prostate_points_var = tk.IntVar(value=prostate_points)
         prostate_min_distance = prostate_config.get('min_distance_from_center', 0.5)
         self.prostate_min_distance_var = tk.DoubleVar(value=prostate_min_distance)
+        prostate_ps = prostate_config.get('phase_shift', {})
+        self.prostate_phase_shift_enabled_var = tk.BooleanVar(value=prostate_ps.get('enabled', False))
+        self.prostate_phase_shift_delay_var = tk.DoubleVar(value=prostate_ps.get('delay_percentage', 10.0))
+        self.prostate_phase_shift_min_segment = prostate_ps.get('min_segment_duration', 0.25)
 
         self.setup_tabs()
 
@@ -223,9 +227,19 @@ class ConversionTabs:
         min_distance_scale.grid(row=4, column=1, sticky=(tk.W, tk.E), padx=5, pady=5)
         ttk.Label(self.prostate_frame, text="(0.3-0.9) Distance for tear-shaped constant zone").grid(row=4, column=2, sticky=tk.W, padx=5, pady=5)
 
+        # Phase-shifted prostate versions
+        ttk.Checkbutton(self.prostate_frame, text="Generate phase-shifted versions (*-prostate-2.funscript)",
+                       variable=self.prostate_phase_shift_enabled_var).grid(row=5, column=0, columnspan=2, sticky=tk.W, padx=5, pady=5)
+        delay_frame = ttk.Frame(self.prostate_frame)
+        delay_frame.grid(row=5, column=2, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(delay_frame, text="Delay:").pack(side=tk.LEFT)
+        delay_entry = ttk.Entry(delay_frame, textvariable=self.prostate_phase_shift_delay_var, width=6)
+        delay_entry.pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Label(delay_frame, text="% of local segment duration").pack(side=tk.LEFT, padx=(2, 0))
+
         # Convert to 2D button
         self.prostate_convert_button = ttk.Button(self.prostate_frame, text="Convert to 2D", command=self.convert_prostate_2d)
-        self.prostate_convert_button.grid(row=5, column=0, columnspan=3, pady=10)
+        self.prostate_convert_button.grid(row=6, column=0, columnspan=3, pady=10)
 
         # Configure grid weights
         self.prostate_frame.columnconfigure(1, weight=1)
@@ -310,5 +324,10 @@ class ConversionTabs:
             'generate_from_inverted': self.prostate_invert_var.get(),
             'algorithm': self.prostate_algorithm_var.get(),
             'points_per_second': self.prostate_points_var.get(),
-            'min_distance_from_center': self.prostate_min_distance_var.get()
+            'min_distance_from_center': self.prostate_min_distance_var.get(),
+            'phase_shift': {
+                'enabled': self.prostate_phase_shift_enabled_var.get(),
+                'delay_percentage': self.prostate_phase_shift_delay_var.get(),
+                'min_segment_duration': self.prostate_phase_shift_min_segment
+            }
         }

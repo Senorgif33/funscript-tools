@@ -24,6 +24,8 @@ dimension of what you feel.
 | `*.beta.funscript` | Electrode Y position | Up–down movement of sensation |
 | `*.alpha-prostate.funscript` | Prostate electrode X | Spatial position for prostate channel |
 | `*.beta-prostate.funscript` | Prostate electrode Y | Spatial position for prostate channel |
+| `*.alpha-prostate-2.funscript` | Phase-shifted prostate X | Delayed prostate X (optional) |
+| `*.beta-prostate-2.funscript` | Phase-shifted prostate Y | Delayed prostate Y (optional) |
 | `*.frequency.funscript` | Pulse rate envelope | Overall intensity rhythm |
 | `*.pulse_frequency.funscript` | Pulse rate by action | How directly action speed maps to sensation rate |
 | `*.volume.funscript` | Amplitude envelope | Overall strength |
