@@ -75,11 +75,18 @@ EVENT_DEFINITIONS_PATH = get_resource_path("config.event_definitions.yml")
 class EventLibraryPanel(ttk.Frame):
     """Panel for browsing and selecting event definitions"""
 
-    def __init__(self, parent, event_definitions: Dict[str, Any], groups: List[Dict[str, str]], on_select_callback):
+    def __init__(self, parent, event_definitions: Dict[str, Any], groups: List[Dict[str, str]],
+                 on_select_callback, favorites: Optional[List[str]] = None,
+                 on_favorites_changed=None):
         super().__init__(parent)
         self.event_definitions = event_definitions
         self.groups = groups
         self.on_select_callback = on_select_callback
+        self.on_favorites_changed = on_favorites_changed
+        # Drop stale favorites that no longer exist in definitions
+        self.favorites: List[str] = [n for n in (favorites or []) if n in event_definitions]
+        self._context_menu_event: Optional[str] = None
+        self._tooltip_bound = False
 
         self.setup_ui()
         self.populate_events()
@@ -117,8 +124,14 @@ class EventLibraryPanel(ttk.Frame):
         # Bind selection event
         self.event_tree.bind('<<TreeviewSelect>>', self.on_event_selected)
         self.event_tree.bind('<Double-Button-1>', self.on_event_double_click)
+        self.event_tree.bind('<Button-3>', self._on_tree_right_click)
 
-        # Add to timeline button
+        # Context menu for favoriting
+        self._fav_menu = tk.Menu(self, tearoff=0)
+        self._fav_menu.add_command(label="Favorite", command=self._context_favorite)
+        self._fav_menu.add_command(label="Unfavorite", command=self._context_unfavorite)
+
+        # Add to timeline / favorite buttons
         btn_frame = ttk.Frame(self)
         btn_frame.pack(fill=tk.X, padx=5, pady=5)
 
@@ -126,9 +139,32 @@ class EventLibraryPanel(ttk.Frame):
                                               command=self.on_add_to_timeline, state='disabled')
         self.add_to_timeline_btn.pack(fill=tk.X)
 
+        self.favorite_btn = ttk.Button(btn_frame, text="Favorite",
+                                       command=self._on_favorite_button, state='disabled')
+        self.favorite_btn.pack(fill=tk.X, pady=(4, 0))
+
+    def _valid_favorites(self) -> List[str]:
+        """Return favorited event keys that still exist in definitions."""
+        return sorted(name for name in self.favorites if name in self.event_definitions)
+
+    def _event_display_name(self, event_name: str) -> str:
+        """Display name with optional favorite star prefix."""
+        display_name = event_name.replace('mcb_', '').replace('clutch_', '').replace('_', ' ').title()
+        if event_name in self.favorites:
+            return f"\u2605 {display_name}"
+        return display_name
+
     def categorize_events(self) -> List[Dict[str, Any]]:
         """Group events by category based on groups configuration"""
         categorized = []
+
+        valid_favorites = self._valid_favorites()
+        if valid_favorites:
+            categorized.append({
+                'name': 'Favorites',
+                'description': 'Your favorited events',
+                'events': valid_favorites
+            })
 
         for group in self.groups:
             group_name = group['name']
@@ -168,16 +204,52 @@ class EventLibraryPanel(ttk.Frame):
 
             # Add events as children
             for event_name in category_info['events']:
-                # Create display name (remove prefix, replace _ with space, title case)
-                display_name = event_name.replace('mcb_', '').replace('clutch_', '').replace('_', ' ').title()
-                self.event_tree.insert(category_id, 'end', text=display_name,
+                self.event_tree.insert(category_id, 'end', text=self._event_display_name(event_name),
                                        values=(event_name,), tags=('event',))
 
         # Add tooltip support
         self.create_tooltip_support()
 
+    def _rebuild_tree(self, select_event: Optional[str] = None):
+        """Rebuild the tree, preserving search filter and optional selection."""
+        search_text = self.search_var.get().strip()
+        for item in self.event_tree.get_children():
+            self.event_tree.delete(item)
+
+        if search_text:
+            self._populate_search_results(search_text.lower())
+        else:
+            self.populate_events()
+
+        if select_event:
+            self._select_event_in_tree(select_event)
+        self._update_favorite_button()
+
+    def _populate_search_results(self, search_text: str):
+        """Fill the tree with search matches."""
+        matches = [name for name in self.event_definitions.keys()
+                   if search_text in name.lower()]
+        if matches:
+            search_category = self.event_tree.insert('', 'end', text='Search Results', open=True)
+            for event_name in sorted(matches):
+                self.event_tree.insert(search_category, 'end', text=self._event_display_name(event_name),
+                                       values=(event_name,), tags=('event',))
+
+    def _select_event_in_tree(self, event_name: str):
+        """Select the first tree item matching event_name."""
+        for parent in self.event_tree.get_children():
+            for child in self.event_tree.get_children(parent):
+                values = self.event_tree.item(child, 'values')
+                if values and values[0] == event_name:
+                    self.event_tree.selection_set(child)
+                    self.event_tree.see(child)
+                    return
+
     def create_tooltip_support(self):
         """Add tooltip support for category items"""
+        if self._tooltip_bound:
+            return
+
         self.tooltip_label = None
 
         def on_motion(event):
@@ -207,6 +279,7 @@ class EventLibraryPanel(ttk.Frame):
 
         self.event_tree.bind('<Motion>', on_motion)
         self.event_tree.bind('<Leave>', on_leave)
+        self._tooltip_bound = True
 
     def hide_tooltip(self):
         """Hide the tooltip if it exists"""
@@ -225,20 +298,11 @@ class EventLibraryPanel(ttk.Frame):
         if not search_text:
             # No search, show all categories
             self.populate_events()
+            self._update_favorite_button()
             return
 
-        # Search and display matching events
-        matches = []
-        for event_name in self.event_definitions.keys():
-            if search_text in event_name.lower():
-                matches.append(event_name)
-
-        if matches:
-            search_category = self.event_tree.insert('', 'end', text='Search Results', open=True)
-            for event_name in sorted(matches):
-                display_name = event_name.replace('mcb_', '').replace('clutch_', '').replace('_', ' ').title()
-                self.event_tree.insert(search_category, 'end', text=display_name,
-                                       values=(event_name,), tags=('event',))
+        self._populate_search_results(search_text)
+        self._update_favorite_button()
 
     def on_event_selected(self, event):
         """Handle event selection in tree"""
@@ -249,10 +313,76 @@ class EventLibraryPanel(ttk.Frame):
             if self.event_tree.item(item, 'tags'):
                 event_name = self.event_tree.item(item, 'values')[0]
                 self.add_to_timeline_btn.config(state='normal')
+                self._update_favorite_button()
                 if self.on_select_callback:
                     self.on_select_callback(event_name)
             else:
                 self.add_to_timeline_btn.config(state='disabled')
+                self.favorite_btn.config(state='disabled', text="Favorite")
+        else:
+            self.add_to_timeline_btn.config(state='disabled')
+            self.favorite_btn.config(state='disabled', text="Favorite")
+
+    def _update_favorite_button(self):
+        """Enable/label the Favorite button based on current selection."""
+        event_name = self.get_selected_event()
+        if not event_name:
+            self.favorite_btn.config(state='disabled', text="Favorite")
+            return
+        if event_name in self.favorites:
+            self.favorite_btn.config(state='normal', text="Unfavorite")
+        else:
+            self.favorite_btn.config(state='normal', text="Favorite")
+
+    def _set_favorite(self, event_name: str, favorited: bool):
+        """Add or remove an event from favorites and persist."""
+        if favorited:
+            if event_name not in self.favorites:
+                self.favorites.append(event_name)
+        else:
+            self.favorites = [n for n in self.favorites if n != event_name]
+
+        if self.on_favorites_changed:
+            self.on_favorites_changed(list(self.favorites))
+        self._rebuild_tree(select_event=event_name)
+
+    def _on_favorite_button(self):
+        """Toggle favorite for the currently selected event."""
+        event_name = self.get_selected_event()
+        if not event_name:
+            return
+        self._set_favorite(event_name, event_name not in self.favorites)
+
+    def _on_tree_right_click(self, event):
+        """Show Favorite/Unfavorite context menu on event rows."""
+        item = self.event_tree.identify_row(event.y)
+        if not item:
+            return
+        tags = self.event_tree.item(item, 'tags')
+        if not tags or 'event' not in tags:
+            return
+        self.event_tree.selection_set(item)
+        self.on_event_selected(None)
+        values = self.event_tree.item(item, 'values')
+        if not values:
+            return
+        event_name = values[0]
+        self._context_menu_event = event_name
+        is_fav = event_name in self.favorites
+        self._fav_menu.entryconfig("Favorite", state='disabled' if is_fav else 'normal')
+        self._fav_menu.entryconfig("Unfavorite", state='normal' if is_fav else 'disabled')
+        try:
+            self._fav_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._fav_menu.grab_release()
+
+    def _context_favorite(self):
+        if self._context_menu_event:
+            self._set_favorite(self._context_menu_event, True)
+
+    def _context_unfavorite(self):
+        if self._context_menu_event:
+            self._set_favorite(self._context_menu_event, False)
 
     def on_event_double_click(self, event):
         """Handle double-click on event"""
@@ -271,6 +401,10 @@ class EventLibraryPanel(ttk.Frame):
         if selection and self.event_tree.item(selection[0], 'tags'):
             return self.event_tree.item(selection[0], 'values')[0]
         return None
+
+    def get_favorites(self) -> List[str]:
+        """Return the current favorites list."""
+        return list(self.favorites)
 
 
 class ParameterPanel(ttk.Frame):
@@ -1176,7 +1310,7 @@ class CanvasTimelinePanel(ttk.Frame):
         if self._layout_dirty:
             self._assign_lanes()
             self._conflicts = self._find_conflicts()
-        self._block_rects = [self._compute_block_rect(i) for i in range(len(self.events))]
+        self._rebuild_block_rects()
 
         cw = self._canvas_w()
         ch = self._canvas_h()
@@ -1410,6 +1544,15 @@ class CanvasTimelinePanel(ttk.Frame):
         y1 = self.RULER_H + 3
         y2 = y1 + self.TRACK_H - 6
         return x1, y1, x2, y2
+
+    def _rebuild_block_rects(self):
+        """Rebuild hit-test rectangles to match the current events list."""
+        self._block_rects = [self._compute_block_rect(i) for i in range(len(self.events))]
+
+    def _ensure_block_rects(self):
+        """Rebuild rects if they are out of sync with events (deferred redraw race)."""
+        if len(self._block_rects) != len(self.events):
+            self._rebuild_block_rects()
 
     def _event_color(self, event_name: str):
         """Return (fill, dark_outline) colour pair for the given event name."""
@@ -1760,6 +1903,7 @@ class CanvasTimelinePanel(ttk.Frame):
         next event in the stack each time the same area is clicked, so that
         all events remain reachable even when drawn on top of each other.
         """
+        self._ensure_block_rects()
         hits = []
         for idx in range(len(self.events)):
             x1, y1, x2, y2 = self._block_rects[idx]
@@ -2098,6 +2242,9 @@ class VideoPanel(ttk.Frame):
         self._meta_cached = False
         self._label_tick: int = 0
         self._time_show_remaining = False   # toggled by clicking the time label
+        self._on_video_size_known = None  # Callable[[int, int], None] fired with (width, height)
+        self._video_w: int = 0
+        self._video_h: int = 0
 
         # Pack order matters: BOTTOM items stack upward, canvas fills remaining space.
         # Controls bar (bottom-most)
@@ -2133,6 +2280,7 @@ class VideoPanel(ttk.Frame):
         # Video canvas (fills remaining space above seek bar)
         self._canvas = tk.Canvas(self, bg='black')
         self._canvas.pack(fill=tk.BOTH, expand=True)
+        self._canvas.bind('<Configure>', self._on_canvas_resize)
 
         # Keyboard callbacks — set by dialog after construction
         self.on_arrow: Optional[callable] = None        # fn(frames: int)
@@ -2149,6 +2297,16 @@ class VideoPanel(ttk.Frame):
             widget.bind('<Shift-Control-Left>',  lambda e: self.on_seek_ms(-30_000) if self.on_seek_ms else None)
             widget.bind('<Shift-Control-Right>', lambda e: self.on_seek_ms(30_000)  if self.on_seek_ms else None)
         self._canvas.bind('<Button-1>', lambda e: self._canvas.focus_set())
+
+    def reattach_hwnd(self):
+        """Re-bind VLC output to the canvas HWND (after tab switch / resize)."""
+        if self._vlc_mp is None:
+            return
+        try:
+            self.update_idletasks()
+            self._vlc_mp.set_hwnd(self._canvas.winfo_id())
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Public API
@@ -2302,8 +2460,27 @@ class VideoPanel(ttk.Frame):
                     self._status_label.config(text=name)
                 except Exception:
                     self._status_label.config(text='Loaded')
+                self._emit_video_size(attempt=0)
         except Exception:
             pass
+
+    def _emit_video_size(self, attempt: int = 0):
+        """Read pixel size from VLC and notify the dialog (retry if not ready)."""
+        if self._vlc_mp is None:
+            return
+        try:
+            size = self._vlc_mp.video_get_size(0)
+            w = int(size[0]) if size else 0
+            h = int(size[1]) if size else 0
+        except Exception:
+            w, h = 0, 0
+        if w > 0 and h > 0:
+            self._video_w, self._video_h = w, h
+            if self._on_video_size_known is not None:
+                self._on_video_size_known(w, h)
+            return
+        if attempt < 10:
+            self.after(200, lambda: self._emit_video_size(attempt + 1))
 
     def _on_eof(self):
         """VLC end-of-file — called on Tkinter thread via after(0)."""
@@ -2426,7 +2603,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
     Main dialog for visual custom events timeline building.
 
     Layout: two-zone vertical PanedWindow.
-      - Top zone: EventLibraryPanel (left) + ParameterPanel (right)
+      - Top zone: EventLibraryPanel | Video/Parameters notebook | Event List
       - Bottom zone: CanvasTimelinePanel (full width)
     """
 
@@ -2438,8 +2615,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         screen_h = self.winfo_screenheight()
         dialog_h = min(900, screen_h - 48)
         self.geometry(f"1200x{dialog_h}")
-        self.transient(parent)
-        self.grab_set()
+        # Normal window (not transient/modal) so Windows shows min/max/close.
 
         # Store config
         self.config = config if config is not None else {}
@@ -2454,6 +2630,16 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self.backup_path            = None
         self.current_event_for_params   = None
         self.current_editing_index      = None  # index of the event loaded in params panel
+
+        # Absolute chrome sizes (captured once after default layout)
+        self._chrome_lib_w: Optional[int] = None
+        self._chrome_list_w: Optional[int] = None
+        self._chrome_timeline_h: int = 200
+        self._chrome_file_h: Optional[int] = None
+        self._chrome_options_h: Optional[int] = None
+        self._chrome_action_h: Optional[int] = None
+        self._chrome_ready = False
+        self._sash_configure_after: Optional[str] = None
 
         # Load event definitions
         try:
@@ -2491,6 +2677,9 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self.timeline_panel.redraw()
         _theme.register(self._on_theme_change)
         self.protocol('WM_DELETE_WINDOW', self._on_close)
+        self.lift()
+        self.focus_force()
+        self.bind('<Configure>', self._on_dialog_configure)
 
     def _on_close(self):
         if self.is_dirty and self.timeline_panel.events:
@@ -2542,31 +2731,61 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self.main_paned = ttk.PanedWindow(self, orient=tk.VERTICAL)
         self.main_paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # --- Top pane: Library (left) + Parameters (right) ---
-        top_paned = ttk.PanedWindow(self.main_paned, orient=tk.HORIZONTAL)
-        self.main_paned.add(top_paned, weight=2)
+        # --- Top pane: Library (left) + Video/Parameters notebook + Event List ---
+        self._top_paned = ttk.PanedWindow(self.main_paned, orient=tk.HORIZONTAL)
+        self.main_paned.add(self._top_paned, weight=2)
 
-        library_outer = ttk.LabelFrame(top_paned, text="Event Library", padding=5)
+        self._library_outer = ttk.LabelFrame(self._top_paned, text="Event Library", padding=5)
+        favorites = list(self.config.get('ui', {}).get('favorite_events', []))
         self.library_panel = EventLibraryPanel(
-            library_outer, self.event_definitions,
-            self.event_groups, self.on_library_event_selected
+            self._library_outer, self.event_definitions,
+            self.event_groups, self.on_library_event_selected,
+            favorites=favorites,
+            on_favorites_changed=self._on_favorites_changed,
         )
         self.library_panel.pack(fill=tk.BOTH, expand=True)
-        top_paned.add(library_outer, weight=1)
+        self._top_paned.add(self._library_outer, weight=1)
 
         # Wire Add-to-Timeline button
         self.library_panel.add_to_timeline_btn.config(command=self.on_add_event_to_timeline)
 
-        params_outer = ttk.LabelFrame(top_paned, text="Parameters", padding=5)
-        self.params_panel = ParameterPanel(params_outer, apply_callback=self.on_apply_parameters)
+        # Middle: Video | Parameters notebook
+        self._center_nb = ttk.Notebook(self._top_paned)
+        self._top_paned.add(self._center_nb, weight=2)
+
+        self._video_tab = ttk.Frame(self._center_nb)
+        self._params_tab = ttk.Frame(self._center_nb)
+        self._center_nb.add(self._video_tab, text='Video')
+        self._center_nb.add(self._params_tab, text='Parameters')
+
+        self._video_panel = None
+        self._video_driving = False
+        self._seek_settling_count = 0
+        self._video_tick_count = 0
+        self._pre_video_geometry: Optional[str] = None
+
+        if _VLC_AVAILABLE:
+            self._video_panel = VideoPanel(self._video_tab)
+            self._video_panel.pack(fill=tk.BOTH, expand=True)
+        else:
+            ttk.Label(
+                self._video_tab,
+                text='VLC not available — video preview requires Windows + python-vlc.',
+                foreground='gray',
+                wraplength=280,
+                justify=tk.CENTER,
+            ).pack(expand=True, padx=20, pady=20)
+
+        self.params_panel = ParameterPanel(self._params_tab, apply_callback=self.on_apply_parameters)
         self.params_panel.save_default_callback = self.on_save_event_defaults
         self.params_panel.pack(fill=tk.BOTH, expand=True)
-        top_paned.add(params_outer, weight=2)
+
+        self._center_nb.bind('<<NotebookTabChanged>>', self._on_center_tab_changed)
 
         # Event List (third top panel)
-        list_outer = ttk.LabelFrame(top_paned, text="Event List", padding=5)
+        self._list_outer = ttk.LabelFrame(self._top_paned, text="Event List", padding=5)
         self._event_list = ttk.Treeview(
-            list_outer, columns=('time', 'name', 'dur'),
+            self._list_outer, columns=('time', 'name', 'dur'),
             show='headings', selectmode='browse'
         )
         self._event_list.heading('time', text='Time')
@@ -2575,12 +2794,12 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self._event_list.column('time', width=50, anchor='e', stretch=False)
         self._event_list.column('name', width=90, anchor='w')
         self._event_list.column('dur',  width=50, anchor='e', stretch=False)
-        _ls = ttk.Scrollbar(list_outer, orient='vertical', command=self._event_list.yview)
+        _ls = ttk.Scrollbar(self._list_outer, orient='vertical', command=self._event_list.yview)
         self._event_list.configure(yscrollcommand=_ls.set)
         self._event_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         _ls.pack(side=tk.RIGHT, fill=tk.Y)
         self._event_list.bind('<<TreeviewSelect>>', self._on_event_list_select)
-        top_paned.add(list_outer, weight=1)
+        self._top_paned.add(self._list_outer, weight=1)
 
         # --- Bottom pane: Timeline ---
         timeline_outer = ttk.LabelFrame(self.main_paned, text='Timeline', padding=5)
@@ -2604,37 +2823,27 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         # Wire event list refresh to every timeline redraw
         self.timeline_panel.on_redraw_callback = self._refresh_event_list
 
-        # --- Floating video window (hidden until toggled; Windows + VLC only) ---
-        self._video_win = None
-        self._video_panel = None
-        self._video_driving = False
-        self._seek_settling_count = 0
-        self._video_tick_count = 0
-        if _VLC_AVAILABLE:
-            self._video_win = tk.Toplevel(self)
-            self._video_win.withdraw()  # hide immediately — avoids WM focus-steal on Windows
-            self._video_win.title('Video')
-            self._video_win.geometry('800x500')
-            self._video_win.protocol('WM_DELETE_WINDOW', self._on_video_win_close)
-            self._video_panel = VideoPanel(self._video_win)
-            self._video_panel.pack(fill=tk.BOTH, expand=True)
-
+        if self._video_panel is not None:
             # Wire playhead ↔ video sync
             self.timeline_panel.on_playhead_change = self._on_playhead_change
             self.timeline_panel.play_pause_callback = self._video_panel.toggle_play
             self._video_panel._on_playback_tick = self._on_video_tick
             self._video_panel._on_duration_known = self._on_video_duration_known
+            self._video_panel._on_video_size_known = self._on_video_size_known
 
-            # Forward video-window key events to the timeline panel methods
+            # Forward video key events to the timeline panel methods
             self._video_panel.on_arrow      = self.timeline_panel._on_arrow
             self._video_panel.on_seek_ms    = self.timeline_panel._on_seek_ms
             self._video_panel.on_play_pause = self._video_panel.toggle_play
+
+        # Start on Parameters (editing); Load Video switches to Video tab
+        self._center_nb.select(self._params_tab)
 
         # Set initial sash position after layout is realised
         self.after(100, self._init_sash)
 
     def _init_sash(self, _attempt: int = 0):
-        """Set initial sash so the timeline is tall enough to show the funscript track."""
+        """Set initial sash and capture absolute default chrome sizes once."""
         if _attempt == 0:
             self.update_idletasks()  # only on first attempt — avoid <Configure> storms
         try:
@@ -2643,10 +2852,65 @@ class CustomEventsBuilderDialog(tk.Toplevel):
                 if _attempt < 10:   # give up after ~1 second to avoid infinite retry loop
                     self.after(100, lambda: self._init_sash(_attempt + 1))
                 return
-            # Give timeline ~200 px — enough to show ruler + events + funscript waveform
-            self.main_paned.sashpos(0, max(100, total - 200))
+
+            if not self._chrome_ready:
+                self._chrome_lib_w = max(self._library_outer.winfo_width(), 1)
+                self._chrome_list_w = max(self._list_outer.winfo_width(), 1)
+                self._chrome_timeline_h = 200
+                self._chrome_file_h = max(self._file_frame.winfo_height(), 1)
+                self._chrome_options_h = max(self._options_frame.winfo_height(), 1)
+                self._chrome_action_h = max(self._action_frame.winfo_height(), 1)
+                self._chrome_ready = True
+
+            self._apply_chrome_sashes()
         except tk.TclError:
             pass
+
+    def _apply_chrome_sashes(self):
+        """Lock library/list/timeline to absolute default pixel sizes."""
+        if not self._chrome_ready:
+            return
+        lib_w = self._chrome_lib_w or 1
+        list_w = self._chrome_list_w or 1
+        timeline_h = self._chrome_timeline_h
+        try:
+            total_w = self._top_paned.winfo_width()
+            if total_w > lib_w + list_w + 50:
+                self._top_paned.sashpos(0, lib_w)
+                self._top_paned.sashpos(1, max(lib_w + 50, total_w - list_w))
+            total_h = self.main_paned.winfo_height()
+            if total_h > timeline_h + 100:
+                self.main_paned.sashpos(0, max(100, total_h - timeline_h))
+        except tk.TclError:
+            pass
+
+    def _work_area(self) -> tuple:
+        """Return (usable_w, usable_h) for the monitor work area."""
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        try:
+            v_w = int(self.winfo_vrootwidth())
+            v_h = int(self.winfo_vrootheight())
+            if v_w >= 640 and v_h >= 480:
+                return max(800, v_w), max(600, v_h)
+        except tk.TclError:
+            pass
+        return max(800, screen_w - 16), max(600, screen_h - 48)
+
+    def _on_dialog_configure(self, _event=None):
+        """Debounced: re-apply absolute sashes after maximize/restore/resize."""
+        if not self._chrome_ready:
+            return
+        if self._sash_configure_after is not None:
+            try:
+                self.after_cancel(self._sash_configure_after)
+            except Exception:
+                pass
+        self._sash_configure_after = self.after(100, self._apply_chrome_sashes_debounced)
+
+    def _apply_chrome_sashes_debounced(self):
+        self._sash_configure_after = None
+        self._apply_chrome_sashes()
 
     def _refresh_event_list(self):
         """Sync the Event List Treeview with the current timeline state.
@@ -2714,45 +2978,45 @@ class CustomEventsBuilderDialog(tk.Toplevel):
 
     def create_file_bar(self):
         """Create file operations bar."""
-        file_frame = ttk.Frame(self)
-        file_frame.pack(fill=tk.X, expand=False, padx=5, pady=(5, 0))
+        self._file_frame = ttk.Frame(self)
+        self._file_frame.pack(fill=tk.X, expand=False, padx=5, pady=(5, 0))
 
-        ttk.Label(file_frame, text="Event File:").pack(side=tk.LEFT, padx=(0, 5))
-        file_entry = ttk.Entry(file_frame, textvariable=self.event_file_var, state='readonly')
+        ttk.Label(self._file_frame, text="Event File:").pack(side=tk.LEFT, padx=(0, 5))
+        file_entry = ttk.Entry(self._file_frame, textvariable=self.event_file_var, state='readonly')
         file_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
 
-        ttk.Button(file_frame, text="New",  command=self.on_new_file).pack(side=tk.LEFT, padx=2)
-        ttk.Button(file_frame, text="Load", command=self.on_load_file).pack(side=tk.LEFT, padx=2)
-        ttk.Button(file_frame, text="Save", command=self.on_save_file).pack(side=tk.LEFT, padx=2)
+        ttk.Button(self._file_frame, text="New",  command=self.on_new_file).pack(side=tk.LEFT, padx=2)
+        ttk.Button(self._file_frame, text="Load", command=self.on_load_file).pack(side=tk.LEFT, padx=2)
+        ttk.Button(self._file_frame, text="Save", command=self.on_save_file).pack(side=tk.LEFT, padx=2)
 
     def create_options_bar(self):
         """Create options bar."""
-        options_frame = ttk.LabelFrame(self, text="Options", padding=5)
-        options_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=5)
+        self._options_frame = ttk.LabelFrame(self, text="Options", padding=5)
+        self._options_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=5)
 
-        ttk.Checkbutton(options_frame, text="Backup files",
+        ttk.Checkbutton(self._options_frame, text="Backup files",
                         variable=self.backup_var).pack(side=tk.LEFT, padx=5)
-        ttk.Label(options_frame, text="Headroom:").pack(side=tk.LEFT, padx=(10, 0))
-        ttk.Spinbox(options_frame, from_=0, to=20, textvariable=self.headroom_var,
+        ttk.Label(self._options_frame, text="Headroom:").pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Spinbox(self._options_frame, from_=0, to=20, textvariable=self.headroom_var,
                     width=5).pack(side=tk.LEFT, padx=2)
-        ttk.Checkbutton(options_frame, text="Show waveform",
+        ttk.Checkbutton(self._options_frame, text="Show waveform",
                         variable=self.show_waveform_var,
                         command=self._on_waveform_toggle).pack(side=tk.LEFT, padx=(15, 5))
 
-        ttk.Separator(options_frame, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
-        ttk.Label(options_frame, text="Chapters:").pack(side=tk.LEFT)
-        ttk.Checkbutton(options_frame, text="Funscript",
+        ttk.Separator(self._options_frame, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
+        ttk.Label(self._options_frame, text="Chapters:").pack(side=tk.LEFT)
+        ttk.Checkbutton(self._options_frame, text="Funscript",
                         variable=self.chapter_funscript_var).pack(side=tk.LEFT, padx=(4, 0))
 
     def create_action_bar(self):
         """Create action buttons bar."""
-        action_frame = ttk.Frame(self)
-        action_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(0, 5))
+        self._action_frame = ttk.Frame(self)
+        self._action_frame.pack(side=tk.BOTTOM, fill=tk.X, expand=False, padx=5, pady=(0, 5))
 
-        ttk.Button(action_frame, text="View YAML", command=self.on_view_yaml).pack(side=tk.LEFT, padx=2)
+        ttk.Button(self._action_frame, text="View YAML", command=self.on_view_yaml).pack(side=tk.LEFT, padx=2)
 
         self._dark_toggle_btn = ttk.Button(
-            action_frame,
+            self._action_frame,
             text='\u263d Dark' if not _theme.is_dark() else '\u2600 Light',
             width=8,
             command=self._toggle_dark_mode,
@@ -2760,50 +3024,39 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self._dark_toggle_btn.pack(side=tk.LEFT, padx=2)
 
         if _VLC_AVAILABLE:
-            self._video_toggle_btn = ttk.Button(
-                action_frame, text='\u25b6 Video', width=9, command=self._toggle_video_panel)
-            self._video_toggle_btn.pack(side=tk.LEFT, padx=2)
-            ttk.Button(action_frame, text='Load Video',
+            ttk.Button(self._action_frame, text='Load Video',
                        command=self._load_video_dialog).pack(side=tk.LEFT, padx=2)
 
-        self.apply_button = ttk.Button(action_frame, text="Apply Effects",
+        self.apply_button = ttk.Button(self._action_frame, text="Apply Effects",
                                        command=self.on_apply_effects)
         self.apply_button.pack(side=tk.LEFT, padx=2)
 
-        self.restore_button = ttk.Button(action_frame, text="Restore Backup",
+        self.restore_button = ttk.Button(self._action_frame, text="Restore Backup",
                                          command=self.on_restore_backup, state='disabled')
         self.restore_button.pack(side=tk.LEFT, padx=2)
 
-        ttk.Button(action_frame, text="Close", command=self._on_close).pack(side=tk.RIGHT, padx=2)
+        ttk.Button(self._action_frame, text="Close", command=self._on_close).pack(side=tk.RIGHT, padx=2)
 
-        self.status_label = ttk.Label(action_frame, text="Ready. Select or load an event file.")
+        self.status_label = ttk.Label(self._action_frame, text="Ready. Select or load an event file.")
         self.status_label.pack(side=tk.RIGHT, padx=10)
 
     # ------------------------------------------------------------------ #
     # Video panel                                                          #
     # ------------------------------------------------------------------ #
 
-    def _toggle_video_panel(self):
-        """Show or hide the floating video window."""
-        if self._video_win.winfo_ismapped():
-            self._video_win.withdraw()
-            self._video_toggle_btn.config(text='\u25b6 Video')
-        else:
-            self._video_win.deiconify()
-            self._video_win.lift()
-            self._video_toggle_btn.config(text='\u23f9 Video')
-            # Lazy-load matching video on first show so no MediaPlayer is created
-            # during dialog construction — avoids SDL2_mixer crash when reopening.
-            if self._video_panel._vlc_mp is None:
-                self._try_auto_load_video()
-
-    def _on_video_win_close(self):
-        """User closed the video window via the X button."""
-        self._video_win.withdraw()
-        self._video_toggle_btn.config(text='\u25b6 Video')
+    def _on_center_tab_changed(self, _event=None):
+        """Re-attach VLC when returning to the Video tab."""
+        try:
+            current = self._center_nb.select()
+        except tk.TclError:
+            return
+        if current == str(self._video_tab) and self._video_panel is not None:
+            self.after_idle(self._video_panel.reattach_hwnd)
 
     def _load_video_dialog(self):
         """Open file picker to load a video file into the video panel."""
+        if self._video_panel is None:
+            return
         from tkinter import filedialog
         path = filedialog.askopenfilename(
             title='Select Video File',
@@ -2812,10 +3065,8 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             parent=self,
         )
         if path:
-            # Show the video window before loading so the canvas HWND is
-            # realized and valid when VLC calls set_hwnd().
-            if not self._video_win.winfo_ismapped():
-                self._toggle_video_panel()
+            self._center_nb.select(self._video_tab)
+            self.update_idletasks()
             self._video_panel.load(path)
 
     def _try_auto_load_video(self):
@@ -2827,8 +3078,92 @@ class CustomEventsBuilderDialog(tk.Toplevel):
                     '.MP4', '.MKV', '.AVI', '.MOV', '.WMV', '.M4V'):
             candidate = Path(self.last_processed_directory) / f'{self.last_processed_filename}{ext}'
             if candidate.exists():
+                self._center_nb.select(self._video_tab)
+                self.update_idletasks()
                 self._video_panel.load(str(candidate))
-                return  # load silently; panel stays hidden until user shows it
+                return
+
+    def _on_video_size_known(self, vw: int, vh: int):
+        """Grow the dialog so the middle pane can show the video as large as possible."""
+        if vw <= 0 or vh <= 0:
+            return
+        self._resize_for_video(vw, vh)
+
+    def _resize_for_video(self, vw: int, vh: int):
+        """Grow dialog to fit video in the middle; keep absolute side/bottom chrome."""
+        self.update_idletasks()
+
+        if not self._chrome_ready:
+            self._init_sash()
+            self.update_idletasks()
+        if not self._chrome_ready:
+            return
+
+        if self._pre_video_geometry is None:
+            self._pre_video_geometry = self.geometry()
+
+        lib_w = self._chrome_lib_w or 1
+        list_w = self._chrome_list_w or 1
+        file_h = self._chrome_file_h or 1
+        options_h = self._chrome_options_h or 1
+        action_h = self._chrome_action_h or 1
+        timeline_h = self._chrome_timeline_h
+        video_chrome_h = 52  # seek + controls under canvas
+        pad_w = 24
+        pad_h = 28
+        # Title bar / border allowance so packed chrome stays on-screen
+        deco_h = 40
+
+        usable_w, usable_h = self._work_area()
+        usable_h = max(600, usable_h - deco_h)
+
+        chrome_h = file_h + options_h + action_h + timeline_h + pad_h
+        middle_max_w = max(320, usable_w - lib_w - list_w - pad_w)
+        middle_max_h = max(240, usable_h - chrome_h)
+
+        canvas_max_h = max(120, middle_max_h - video_chrome_h)
+        scale = min(middle_max_w / vw, canvas_max_h / vh)
+        fit_w = max(1, int(vw * scale))
+        fit_h = max(1, int(vh * scale)) + video_chrome_h
+
+        dialog_w = min(usable_w, lib_w + list_w + fit_w + pad_w)
+        dialog_h = min(usable_h, chrome_h + fit_h)
+
+        # Large videos: maximize instead of hand-rolling near-fullscreen geometry
+        if fit_w >= middle_max_w * 0.9 or fit_h >= middle_max_h * 0.9:
+            try:
+                self.state('zoomed')
+            except tk.TclError:
+                self.geometry(f'{usable_w}x{usable_h}+0+0')
+            self.update_idletasks()
+            self.after_idle(self._apply_chrome_sashes)
+            if self._video_panel is not None:
+                self.after_idle(self._video_panel.reattach_hwnd)
+            return
+
+        # Keep current position when possible; clamp onto work area
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        try:
+            x = self.winfo_x()
+            y = self.winfo_y()
+        except tk.TclError:
+            x, y = 0, 0
+        x = max(0, min(x, max(0, screen_w - dialog_w)))
+        y = max(0, min(y, max(0, screen_h - dialog_h)))
+
+        try:
+            # Leave zoomed state if we were maximized from a prior large video
+            if str(self.state()) == 'zoomed':
+                self.state('normal')
+        except tk.TclError:
+            pass
+
+        self.geometry(f'{dialog_w}x{dialog_h}+{x}+{y}')
+        self.update_idletasks()
+        self._apply_chrome_sashes()
+        if self._video_panel is not None:
+            self.after_idle(self._video_panel.reattach_hwnd)
 
     def _on_playhead_change(self, ms: float):
         """Timeline playhead moved → seek video. Works during playback too."""
@@ -2996,6 +3331,24 @@ class CustomEventsBuilderDialog(tk.Toplevel):
     # ------------------------------------------------------------------ #
     # Library / parameter panel event handlers                            #
     # ------------------------------------------------------------------ #
+
+    def _on_favorites_changed(self, favorites: List[str]):
+        """Persist favorite event keys without rewriting the rest of config.json."""
+        from config import resolve_config_path
+
+        valid = [n for n in favorites if n in self.event_definitions]
+        self.config.setdefault('ui', {})['favorite_events'] = list(valid)
+        try:
+            path = resolve_config_path()
+            data: Dict[str, Any] = {}
+            if path.exists():
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            data.setdefault('ui', {})['favorite_events'] = list(valid)
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            log.warning("Failed to save favorite events: %s", e)
 
     def on_library_event_selected(self, event_name: str):
         """Handle event selection in the library panel."""

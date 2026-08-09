@@ -1,7 +1,23 @@
 import json
 import os
+import sys
+import copy
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Union
+
+
+def resolve_config_path(config_file: Union[str, Path] = "config.json") -> Path:
+    """Resolve config.json path for source and frozen builds.
+
+    When frozen, always use the file next to the executable so settings load
+    regardless of the process working directory.
+    """
+    path = Path(config_file)
+    if path.is_absolute():
+        return path
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).parent / path.name
+    return path
 
 
 DEFAULT_CONFIG = {
@@ -73,7 +89,8 @@ DEFAULT_CONFIG = {
         "rdp_epsilon": 0.002
     },
     "ui": {
-        "dark_mode": False
+        "dark_mode": False,
+        "favorite_events": []  # list of event definition keys
     },
     "positional_axes": {
         "mode": "motion_axis",  # kept for backward compat; use generate_legacy/generate_motion_axis flags instead
@@ -181,30 +198,34 @@ PARAMETER_RANGES = {
 
 
 class ConfigManager:
-    def __init__(self, config_file: str = "config.json"):
-        self.config_file = Path(config_file)
-        self.config = DEFAULT_CONFIG.copy()
+    def __init__(self, config_file: Union[str, Path] = "config.json"):
+        self.config_file = resolve_config_path(config_file)
+        self.config = copy.deepcopy(DEFAULT_CONFIG)
         self.load_config()
 
     def load_config(self) -> Dict[str, Any]:
         """Load configuration from file, falling back to defaults if file doesn't exist."""
         if self.config_file.exists():
             try:
-                with open(self.config_file, 'r') as f:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
                     loaded_config = json.load(f)
-                    # Merge with defaults to ensure all keys exist
-                    self.config = self._merge_configs(DEFAULT_CONFIG, loaded_config)
+                # Merge with defaults to ensure all keys exist
+                self.config = self._merge_configs(DEFAULT_CONFIG, loaded_config)
+                try:
                     self.validate_config()
-            except (json.JSONDecodeError, ValueError) as e:
+                except ValueError as e:
+                    # Keep user's loaded values; do not silently discard the file
+                    print(f"Warning: configuration validation issue: {e}")
+            except json.JSONDecodeError as e:
                 print(f"Error loading config file: {e}")
                 print("Using default configuration.")
-                self.config = DEFAULT_CONFIG.copy()
+                self.config = copy.deepcopy(DEFAULT_CONFIG)
         return self.config
 
     def save_config(self) -> bool:
         """Save current configuration to file."""
         try:
-            with open(self.config_file, 'w') as f:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, indent=2)
             return True
         except Exception as e:
@@ -213,7 +234,7 @@ class ConfigManager:
 
     def get_config(self) -> Dict[str, Any]:
         """Get current configuration."""
-        return self.config.copy()
+        return copy.deepcopy(self.config)
 
     def update_config(self, new_config: Dict[str, Any]) -> bool:
         """Update configuration with new values."""
@@ -227,7 +248,7 @@ class ConfigManager:
 
     def reset_to_defaults(self):
         """Reset configuration to defaults."""
-        self.config = DEFAULT_CONFIG.copy()
+        self.config = copy.deepcopy(DEFAULT_CONFIG)
 
     def validate_config(self):
         """Validate configuration values against allowed ranges."""
@@ -282,12 +303,12 @@ class ConfigManager:
 
     def _merge_configs(self, base: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, Any]:
         """Recursively merge configuration dictionaries."""
-        result = base.copy()
+        result = copy.deepcopy(base)
 
         for key, value in update.items():
             if key in result and isinstance(result[key], dict) and isinstance(value, dict):
                 result[key] = self._merge_configs(result[key], value)
             else:
-                result[key] = value
+                result[key] = copy.deepcopy(value)
 
         return result

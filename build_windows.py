@@ -141,11 +141,10 @@ def create_release_package():
             shutil.copy2(doc, release_dir / doc)
             print(f"Copied: {doc}")
 
-    # Copy config files to be next to the exe
-    # config.json might contain user settings, but we include default if it exists
+    # Ship a starter config.json only for fresh release packages (not user installs)
     if Path("config.json").exists():
         shutil.copy2("config.json", release_dir / "config.json")
-        print("Copied: config.json")
+        print("Copied: config.json (starter template for new installs)")
 
     if Path("config.event_definitions.yml").exists():
         shutil.copy2("config.event_definitions.yml", release_dir / "config.event_definitions.yml")

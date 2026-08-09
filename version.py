@@ -238,9 +238,16 @@ Version information for Restim Funscript Processor
            Version key held the app version instead of the required desktop-entry-spec version, and
            the Icon= file was never actually written. Linux build re-enabled in the tag-triggered
            release workflow.
+2.5.0 - Custom Event Builder video embed, favorites, and config fixes:
+        1. Favorite events in the Event Library (persist in config.json ui.favorite_events)
+        2. Embedded Video|Parameters notebook (replaces floating video window); resize/maximize
+           keeps absolute side/timeline chrome; normal min/max/close window chrome
+        3. Config: resolve config.json next to frozen exe; deep-copy merge/get; do not discard
+           user config on validation warnings; do not bundle config.json in the Windows exe
+        4. Timeline hit-test rects stay in sync with events (deferred redraw race)
 """
 
-__version__ = "2.4.9"
+__version__ = "2.5.0"
 __app_name__ = "Restim Funscript Processor"
 __description__ = "GUI application for processing funscript files for electrostimulation devices"
 __author__ = "Funscript Tools Project"
