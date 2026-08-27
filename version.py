@@ -248,9 +248,19 @@ Version information for Restim Funscript Processor
 2.5.1 - Custom Event Builder timeline drag performance:
         1. Dialog Configure handler ignores child widget Configure events and only re-applies
            chrome sashes when the toplevel size actually changes (fixes sluggish timeline drag)
+2.5.2 - MCB orgasm countdown events and timeline cue ticks:
+        1. Added mcb_goodboy (27 Hz / width 50 / 5s) beside mcb_submit
+        2. Added mcb_orgasm_countdown (pulse/amp/goodBoy; base stroke untouched) and
+           mcb_orgasm_countdown_stroke_override (same + overwrite α/β/e1-e4);
+           place on countdown "5"; orgasm peak at +21s
+        3. Optional timeline_cues on event defs drawn as ticks on timeline bars (orgasm cue only;
+           display-only, no processor/overlap changes)
+2.5.3 - Orgasm countdown stretch: climax and goodBoy scale with duration:
+        1. On apply, seg_orgasm_ms = duration_ms − orgasm_offset_ms (lead-in/fade fixed)
+        2. goodboy_duration_ms = max(5000, 5000 × seg_orgasm_ms / 25867)
 """
 
-__version__ = "2.5.1"
+__version__ = "2.5.3"
 __app_name__ = "Restim Funscript Processor"
 __description__ = "GUI application for processing funscript files for electrostimulation devices"
 __author__ = "Funscript Tools Project"

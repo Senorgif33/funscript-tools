@@ -161,16 +161,77 @@ definitions:
         with open(base_path, "r") as f:
             data = json.load(f)
         chapters = data["metadata"]["chapters"]
-        self.assertEqual(len(chapters), 3)
-        self.assertEqual(chapters[0]["name"], "Old")
-        self.assertEqual(chapters[1]["name"], "General - Good Slave Test")
-        self.assertEqual(chapters[1]["startTime"], "00:00:00.500")
-        self.assertEqual(chapters[1]["endTime"], "00:00:01.500")
+        self.assertEqual(len(chapters), 2)
+        self.assertEqual(chapters[0]["name"], "General - Good Slave Test")
+        self.assertEqual(chapters[0]["startTime"], "00:00:00.500")
+        self.assertEqual(chapters[0]["endTime"], "00:00:01.500")
+        self.assertEqual(chapters[1]["name"], "General - Edge Test")
+
+
+class TestOrgasmCountdownDerive(unittest.TestCase):
+    def test_default_duration_unchanged(self):
+        from processing.event_processor import _derive_orgasm_countdown_params
+
+        params = {
+            'duration_ms': 46867,
+            'orgasm_offset_ms': 21000,
+            'ramp_ms': 1500,
+            'seg_orgasm_ms': 999,  # overwritten
+            'goodboy_duration_ms': 999,
+        }
+        _derive_orgasm_countdown_params(params, 'mcb_orgasm_countdown')
+        self.assertEqual(params['seg_orgasm_ms'], 25867)
+        self.assertEqual(params['goodboy_duration_ms'], 5000)
+
+    def test_double_climax_doubles_goodboy(self):
+        from processing.event_processor import _derive_orgasm_countdown_params
+
+        params = {
+            'duration_ms': 46867 + 25867,  # double climax
+            'orgasm_offset_ms': 21000,
+            'ramp_ms': 1500,
+        }
+        _derive_orgasm_countdown_params(params, 'mcb_orgasm_countdown_stroke_override')
+        self.assertEqual(params['seg_orgasm_ms'], 51734)
+        self.assertEqual(params['goodboy_duration_ms'], 10000)
+
+    def test_short_climax_keeps_goodboy_min_5s(self):
+        from processing.event_processor import _derive_orgasm_countdown_params
+
+        params = {
+            'duration_ms': 36000,  # climax ~15s (< base 25.867s)
+            'orgasm_offset_ms': 21000,
+            'ramp_ms': 1500,
+        }
+        _derive_orgasm_countdown_params(params, 'mcb_orgasm_countdown')
+        self.assertEqual(params['seg_orgasm_ms'], 15000)
+        self.assertEqual(params['goodboy_duration_ms'], 5000)
+
+    def test_too_short_raises(self):
+        from processing.event_processor import _derive_orgasm_countdown_params
+
+        params = {
+            'duration_ms': 21000,
+            'orgasm_offset_ms': 21000,
+            'ramp_ms': 1500,
+        }
+        with self.assertRaises(EventProcessorError):
+            _derive_orgasm_countdown_params(params, 'mcb_orgasm_countdown')
+
+    def test_other_events_untouched(self):
+        from processing.event_processor import _derive_orgasm_countdown_params
+
+        params = {'duration_ms': 99999, 'seg_orgasm_ms': 1, 'goodboy_duration_ms': 2}
+        _derive_orgasm_countdown_params(params, 'mcb_goodboy')
+        self.assertEqual(params['seg_orgasm_ms'], 1)
+        self.assertEqual(params['goodboy_duration_ms'], 2)
+
 
 if __name__ == "__main__":
     print("Running Custom Event Processor Tests (New Architecture)...")
     suite = unittest.TestSuite()
     suite.addTest(unittest.makeSuite(TestEventProcessor))
+    suite.addTest(unittest.makeSuite(TestOrgasmCountdownDerive))
     runner = unittest.TextTestRunner()
     result = runner.run(suite)
     print("Tests finished.")

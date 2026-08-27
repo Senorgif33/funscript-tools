@@ -206,26 +206,18 @@ def export_chapters(
     base_funscript_path = events_dir / f"{base_name}.funscript"
     duration_fallback = resolve_duration_fallback_ms(options, base_funscript_path)
 
-    existing = read_chapters_from_funscript(base_funscript_path)
-    new_chapters = events_to_chapters(events, duration_fallback_ms=duration_fallback)
-    chapters = merge_chapter_lists(existing, new_chapters)
+    chapters = events_to_chapters(events, duration_fallback_ms=duration_fallback)
     if not chapters:
         return ChapterExportResult(messages=["No chapters to export."])
 
     result = ChapterExportResult()
-    added_count = len(chapters) - len(existing)
 
     if base_funscript_path.exists():
         write_chapters_to_funscript(base_funscript_path, chapters)
-        if existing:
-            result.messages.append(
-                f"Merged {added_count} new chapter(s) with {len(existing)} existing "
-                f"in {base_funscript_path.name} ({len(chapters)} total)"
-            )
-        else:
-            result.messages.append(
-                f"Wrote {len(chapters)} chapter(s) to {base_funscript_path.name}"
-            )
+        result.messages.append(
+            f"Wrote {len(chapters)} chapter(s) to {base_funscript_path.name} "
+            f"(replaced any existing chapters)"
+        )
     else:
         result.messages.append(
             f"Skipped funscript chapters: {base_funscript_path.name} not found"

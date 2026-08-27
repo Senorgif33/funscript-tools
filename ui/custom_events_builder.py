@@ -72,6 +72,20 @@ def get_resource_path(relative_path: str) -> Path:
 EVENT_DEFINITIONS_PATH = get_resource_path("config.event_definitions.yml")
 
 
+def _log_custom_events(msg: str) -> None:
+    """Append a line to custom_events.log next to the exe (or cwd when running from source)."""
+    import datetime
+    try:
+        if getattr(sys, 'frozen', False):
+            log_path = Path(sys.executable).parent / 'custom_events.log'
+        else:
+            log_path = Path(__file__).parent.parent / 'custom_events.log'
+        with open(log_path, 'a', encoding='utf-8') as f:
+            f.write(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] {msg}\n")
+    except Exception:
+        pass
+
+
 class EventLibraryPanel(ttk.Frame):
     """Panel for browsing and selecting event definitions"""
 
@@ -866,11 +880,13 @@ class CanvasTimelinePanel(ttk.Frame):
                  change_callback=None,
                  add_callback=None,
                  duplicate_callback=None,
-                 change_type_callback=None):
+                 change_type_callback=None,
+                 event_definitions: Optional[Dict[str, Any]] = None):
         super().__init__(parent)
 
         # ---- Data ----
         self.events: List[Dict[str, Any]] = []
+        self.event_definitions: Dict[str, Any] = event_definitions or {}
         self.selected_index: Optional[int] = None
         self.auto_sort_var = tk.BooleanVar(value=True)
         self.on_change_time = None  # set externally by the dialog
@@ -1526,6 +1542,46 @@ class CanvasTimelinePanel(ttk.Frame):
                     font=('TkDefaultFont', 8),
                     anchor='w',
                     width=max(1, int(block_w - 14))
+                )
+
+            # Visual-only sub-cues from event definition (e.g. orgasm at +21s)
+            if block_w >= 40:
+                self._draw_timeline_cues(ev, y1, y2, x1v, x2v)
+
+    def _draw_timeline_cues(self, ev: Dict[str, Any], y1: float, y2: float,
+                            x1v: float, x2v: float) -> None:
+        """Draw optional timeline_cues ticks from the event definition (UI only)."""
+        definition = self.event_definitions.get(ev.get('name'), {})
+        cues = definition.get('timeline_cues') or []
+        if not cues:
+            return
+
+        dur = float(ev.get('params', {}).get('duration_ms', 0) or 0)
+        if dur <= 0:
+            return
+
+        start_ms = float(ev['time'])
+        for cue in cues:
+            try:
+                offset_ms = float(cue.get('offset_ms', 0))
+            except (TypeError, ValueError):
+                continue
+            if not (0 < offset_ms < dur):
+                continue
+
+            cx = self._ms_to_x(start_ms + offset_ms)
+            if cx < x1v or cx > x2v:
+                continue
+
+            self.canvas.create_line(cx, y1, cx, y2, fill='#ffffff', width=2)
+            label = str(cue.get('label') or '').strip()
+            if label and (x2v - cx) >= 28:
+                self.canvas.create_text(
+                    cx + 3, y1 + 2,
+                    text=label,
+                    fill='#ffffff',
+                    font=('TkDefaultFont', 7),
+                    anchor='nw',
                 )
 
     def _compute_block_rect(self, idx: int) -> tuple:
@@ -2607,7 +2663,8 @@ class CustomEventsBuilderDialog(tk.Toplevel):
       - Bottom zone: CanvasTimelinePanel (full width)
     """
 
-    def __init__(self, parent, config=None, last_processed_filename=None, last_processed_directory=None):
+    def __init__(self, parent, config=None, last_processed_filename=None,
+                 last_processed_directory=None, on_closed=None):
         super().__init__(parent)
         self.title("Custom Event Builder")
         self.resizable(True, True)
@@ -2621,6 +2678,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self.config = config if config is not None else {}
         self.last_processed_filename  = last_processed_filename
         self.last_processed_directory = last_processed_directory
+        self._on_closed = on_closed
 
         # State
         self.event_file_path        = None
@@ -2630,6 +2688,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self.backup_path            = None
         self.current_event_for_params   = None
         self.current_editing_index      = None  # index of the event loaded in params panel
+        self._applying              = False
 
         # Absolute chrome sizes (captured once after default layout)
         self._chrome_lib_w: Optional[int] = None
@@ -2683,6 +2742,13 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self.bind('<Configure>', self._on_dialog_configure)
 
     def _on_close(self):
+        if self._applying:
+            messagebox.showinfo(
+                "Processing",
+                "Wait for Apply Effects to finish before closing.",
+                parent=self,
+            )
+            return
         if self.is_dirty and self.timeline_panel.events:
             result = messagebox.askyesnocancel(
                 "Unsaved Changes",
@@ -2699,6 +2765,12 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         _theme.unregister(self._on_theme_change)
         if self._video_panel is not None:
             self._video_panel.stop()
+        if self._on_closed:
+            try:
+                self._on_closed()
+            except Exception:
+                pass
+            self._on_closed = None
         # Delay destroy so ffpyplayer's internal C thread has time to wind down
         # after close_player(). The primary fix is lazy video loading (no MediaPlayer
         # is created at dialog construction), so this is a secondary safety margin.
@@ -2815,6 +2887,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             add_callback=self.on_add_event_to_timeline_direct,
             duplicate_callback=self.on_duplicate_timeline_event,
             change_type_callback=self.on_change_event_type,
+            event_definitions=self.event_definitions,
         )
         self.timeline_panel.pack(fill=tk.BOTH, expand=True)
 
@@ -3362,11 +3435,19 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             log.warning("Failed to save favorite events: %s", e)
 
     def on_library_event_selected(self, event_name: str):
-        """Handle event selection in the library panel."""
+        """Handle event selection in the library panel (defaults for Add, not timeline edit)."""
+        self.current_editing_index = None
+        self.timeline_panel.selected_index = None
+        self.timeline_panel.redraw()
         self.current_event_for_params = event_name
         event_def = self.event_definitions[event_name]
         self.params_panel.load_event_parameters(event_name, event_def)
         self.params_panel.current_event_definition = event_def
+        self.params_panel.editing_label.config(
+            text="Library selection — use Add to Timeline (not editing a placed event)"
+        )
+        display_name = format_event_display_name(event_name)
+        self.status_label.config(text=f"Library: {display_name} (Add to place on timeline)")
 
     def on_add_event_to_timeline(self, default_time_ms: Optional[int] = None):
         """Add the currently selected library event via time-input dialog.
@@ -3738,6 +3819,10 @@ class CustomEventsBuilderDialog(tk.Toplevel):
     # ------------------------------------------------------------------ #
 
     def on_apply_effects(self):
+        if self._applying:
+            self.status_label.config(text="Already applying — wait for the current run to finish.")
+            return
+
         if not self.timeline_panel.events:
             messagebox.showwarning("No Events",
                                    "Timeline is empty. Add events before applying.",
@@ -3771,9 +3856,30 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             if not self.event_file_path:
                 return
 
+        self._set_applying(True)
+        event_names = [ev['name'] for ev in self.timeline_panel.events]
+        _log_custom_events(
+            f"Apply Effects: file={self.event_file_path} events={event_names}"
+        )
         self.status_label.config(text="Processing… Please wait.")
         processing_thread = threading.Thread(target=self.apply_effects_worker, daemon=True)
         processing_thread.start()
+
+    def _set_applying(self, applying: bool):
+        self._applying = applying
+        state = 'disabled' if applying else 'normal'
+        try:
+            self.apply_button.config(state=state)
+        except tk.TclError:
+            pass
+        try:
+            # Keep restore disabled while applying; re-enable only if a backup exists after.
+            if applying:
+                self.restore_button.config(state='disabled')
+            elif self.backup_path and Path(self.backup_path).exists():
+                self.restore_button.config(state='normal')
+        except tk.TclError:
+            pass
 
     def apply_effects_worker(self):
         try:
@@ -3794,6 +3900,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
 
     def on_processing_success(self, message: str, backup_path):
         self.backup_path = backup_path
+        self._set_applying(False)
         messagebox.showinfo("Success", message, parent=self)
         if backup_path:
             self.restore_button.config(state='normal',
@@ -3803,10 +3910,18 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             self.status_label.config(text="Processing complete.")
 
     def on_processing_error(self, error_message: str):
+        self._set_applying(False)
         messagebox.showerror("Processing Error", error_message, parent=self)
         self.status_label.config(text="Processing failed.")
 
     def on_restore_backup(self):
+        if self._applying:
+            messagebox.showinfo(
+                "Processing",
+                "Wait for Apply Effects to finish before restoring.",
+                parent=self,
+            )
+            return
         if not self.backup_path or not self.backup_path.exists():
             messagebox.showerror("Error", "Backup file not found.", parent=self)
             return

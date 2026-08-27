@@ -113,7 +113,7 @@ class TestChapterExport(unittest.TestCase):
         merged = merge_chapter_lists([chapter], [chapter.copy()])
         self.assertEqual(len(merged), 1)
 
-    def test_export_merges_existing_funscript_chapters(self):
+    def test_export_replaces_existing_funscript_chapters(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             base = tmp_path / "video.funscript"
@@ -139,9 +139,9 @@ class TestChapterExport(unittest.TestCase):
             )
             data = json.loads(base.read_text(encoding="utf-8"))
             chapters = data["metadata"]["chapters"]
-            self.assertEqual(len(chapters), 2)
-            self.assertEqual(chapters[0]["name"], "Existing Scene")
-            self.assertTrue(any("Merged" in m for m in result.messages))
+            self.assertEqual(len(chapters), 1)
+            self.assertEqual(chapters[0]["name"], "General - Edge")
+            self.assertTrue(any("replaced" in m.lower() for m in result.messages))
 
 
 if __name__ == "__main__":

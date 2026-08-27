@@ -42,6 +42,7 @@ class MainWindow:
         self.input_files = []  # Store list of selected files for batch processing
         self.last_processed_filename = None  # Track last processed filename for auto-loading events
         self.last_processed_directory = None  # Track directory of last processed file
+        self._events_builder = None  # Single-instance Custom Event Builder
 
         # Progress tracking
         self.progress_var = tk.IntVar()
@@ -159,7 +160,7 @@ class MainWindow:
         dlg.focus_set()
 
     def open_custom_events_builder(self):
-        """Open the new visual custom events builder."""
+        """Open the new visual custom events builder (single instance)."""
         import datetime
         log_path = Path(sys.executable).parent / 'custom_events.log'
         def log(msg):
@@ -169,19 +170,37 @@ class MainWindow:
             except Exception:
                 pass
         try:
+            existing = self._events_builder
+            if existing is not None:
+                try:
+                    if existing.winfo_exists():
+                        log("Reusing open Custom Event Builder")
+                        existing.lift()
+                        existing.focus_force()
+                        return
+                except tk.TclError:
+                    pass
+                self._events_builder = None
+
             log("Opening Custom Event Builder")
             log(f"  last_processed_filename={self.last_processed_filename}")
             log(f"  last_processed_directory={self.last_processed_directory}")
+
+            def _on_builder_closed():
+                self._events_builder = None
+                log("Dialog closed")
+
             dialog = CustomEventsBuilderDialog(
                 self.root,
                 self.current_config,
                 self.last_processed_filename,
-                self.last_processed_directory
+                self.last_processed_directory,
+                on_closed=_on_builder_closed,
             )
+            self._events_builder = dialog
             log("Dialog created successfully")
-            self.root.wait_window(dialog)
-            log("Dialog closed")
         except Exception:
+            self._events_builder = None
             tb = traceback.format_exc()
             log(f"EXCEPTION:\n{tb}")
             messagebox.showerror(

@@ -141,6 +141,49 @@ def _derive_step_ratio_params(final_params: dict, event_name: str) -> None:
     })
 
 
+# Design defaults for orgasm countdown stretch (lead-in + fade stay fixed).
+_ORGASM_COUNTDOWN_EVENTS = frozenset({
+    'mcb_orgasm_countdown',
+    'mcb_orgasm_countdown_stroke_override',
+})
+_ORGASM_BASE_SEG_MS = 25867.0   # default orgasm enable → fade
+_ORGASM_BASE_GOODBOY_MS = 5000.0
+
+
+def _derive_orgasm_countdown_params(final_params: dict, event_name: str) -> None:
+    """When duration stretches, extend climax (amp9) and scale goodBoy with it.
+
+    Lead-in offsets (countdown, goodBoy start) and fade ramp stay at YAML defaults.
+    seg_orgasm_ms = duration_ms - orgasm_offset_ms
+    goodboy_duration_ms = max(5000, 5000 × seg_orgasm_ms / 25867)
+    """
+    if event_name not in _ORGASM_COUNTDOWN_EVENTS:
+        return
+
+    try:
+        duration_ms = float(final_params.get('duration_ms', 0))
+        orgasm_offset_ms = float(final_params.get('orgasm_offset_ms', 21000))
+        ramp_ms = float(final_params.get('ramp_ms', 1500))
+    except (TypeError, ValueError) as e:
+        raise EventProcessorError(
+            f"Event '{event_name}': invalid duration/orgasm_offset/ramp params: {e}"
+        )
+
+    min_duration = orgasm_offset_ms + max(ramp_ms, 1.0)
+    if duration_ms < min_duration:
+        raise EventProcessorError(
+            f"Event '{event_name}': duration_ms ({duration_ms:g}) must be at least "
+            f"orgasm_offset_ms + ramp_ms ({min_duration:g})."
+        )
+
+    seg_orgasm_ms = duration_ms - orgasm_offset_ms
+    scale = seg_orgasm_ms / _ORGASM_BASE_SEG_MS
+    goodboy_duration_ms = max(_ORGASM_BASE_GOODBOY_MS, _ORGASM_BASE_GOODBOY_MS * scale)
+
+    final_params['seg_orgasm_ms'] = int(round(seg_orgasm_ms))
+    final_params['goodboy_duration_ms'] = int(round(goodboy_duration_ms))
+
+
 def _parse_and_validate_user_events(event_file_path: Path, event_definitions: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Parses a user's YAML event file and performs basic validation against definitions.
@@ -180,6 +223,7 @@ def _parse_and_validate_user_events(event_file_path: Path, event_definitions: Di
             final_params.update(user_event['params'])
 
         _derive_step_ratio_params(final_params, event_name)
+        _derive_orgasm_countdown_params(final_params, event_name)
 
         # Token substitution for step parameters
         processed_steps = []
