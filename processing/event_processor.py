@@ -16,6 +16,10 @@ from processing.chapter_export import (
     event_file_base_name,
     export_chapters,
 )
+from processing.extract_composite import (
+    build_extract_motion_steps,
+    derive_extract_params,
+)
 
 
 class EventProcessorError(Exception):
@@ -224,6 +228,10 @@ def _parse_and_validate_user_events(event_file_path: Path, event_definitions: Di
 
         _derive_step_ratio_params(final_params, event_name)
         _derive_orgasm_countdown_params(final_params, event_name)
+        try:
+            derive_extract_params(final_params, event_name)
+        except ValueError as e:
+            raise EventProcessorError(str(e)) from e
 
         # Token substitution for step parameters
         processed_steps = []
@@ -265,6 +273,9 @@ def _parse_and_validate_user_events(event_file_path: Path, event_definitions: Di
             processed_step['params'] = processed_step_params
             processed_step['start_offset'] = processed_step_start_offset
             processed_steps.append(processed_step)
+
+        # Hub–spoke motion baked at Apply (random spoke order)
+        processed_steps.extend(build_extract_motion_steps(final_params, event_name))
 
         user_event['final_params'] = final_params
         user_event['processed_steps'] = processed_steps

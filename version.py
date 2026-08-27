@@ -258,9 +258,16 @@ Version information for Restim Funscript Processor
 2.5.3 - Orgasm countdown stretch: climax and goodBoy scale with duration:
         1. On apply, seg_orgasm_ms = duration_ms − orgasm_offset_ms (lead-in/fade fixed)
         2. goodboy_duration_ms = max(5000, 5000 × seg_orgasm_ms / 25867)
+2.5.4 - MCB extract composite (Relentless→overload) 3P + 4P:
+        1. Rewrote mcb_extract from SCD hub–spoke poles (N hub, L/R spokes) with
+           proportional pulse/amp schedule, absolute ~dur dwells, soft transitions,
+           depth 0.75–0.95, pulse width 65; min duration 60s; default ~265s
+        2. Rewrote mcb_extract_4p as E1 hub ↔ E2/E3/E4 one-hot spokes (same shell)
+        3. Removed mcb_extract_additive and mcb_extract_4p_additive
+        4. Spoke order randomized once at Apply (optional seed param)
 """
 
-__version__ = "2.5.3"
+__version__ = "2.5.4"
 __app_name__ = "Restim Funscript Processor"
 __description__ = "GUI application for processing funscript files for electrostimulation devices"
 __author__ = "Funscript Tools Project"

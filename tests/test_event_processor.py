@@ -227,11 +227,72 @@ class TestOrgasmCountdownDerive(unittest.TestCase):
         self.assertEqual(params['goodboy_duration_ms'], 2)
 
 
+class TestExtractComposite(unittest.TestCase):
+    def test_default_pulse_amp_offsets(self):
+        from processing.extract_composite import EXTRACT_BASE_MS, derive_extract_params
+
+        params = {'duration_ms': EXTRACT_BASE_MS}
+        derive_extract_params(params, 'mcb_extract')
+        self.assertEqual(params['offset_pulse_0_ms'], 0)
+        self.assertEqual(params['hz_pulse_0'], 60.0)
+        self.assertEqual(params['hz_pulse_4'], 120.0)
+        self.assertEqual(params['amp_0'], 0.01)
+        self.assertEqual(params['amp_9'], 0.04)
+        # last amp segment ends at duration
+        self.assertEqual(
+            params['offset_amp_9_ms'] + params['seg_amp_9_ms'],
+            EXTRACT_BASE_MS,
+        )
+
+    def test_half_duration_scales(self):
+        from processing.extract_composite import EXTRACT_BASE_MS, derive_extract_params
+
+        params = {'duration_ms': EXTRACT_BASE_MS // 2}
+        derive_extract_params(params, 'mcb_extract_4p')
+        self.assertEqual(params['offset_pulse_1_ms'], int(round((EXTRACT_BASE_MS // 2) * 0.353)))
+
+    def test_too_short_raises(self):
+        from processing.extract_composite import derive_extract_params
+
+        with self.assertRaises(ValueError):
+            derive_extract_params({'duration_ms': 59999}, 'mcb_extract')
+
+    def test_motion_3p_seeded(self):
+        from processing.extract_composite import build_extract_motion_steps
+        import random
+
+        params = {'duration_ms': 60000, 'ramp_ms': 500, 'seed': 1}
+        steps = build_extract_motion_steps(params, 'mcb_extract', rng=random.Random(1))
+        self.assertGreater(len(steps), 10)
+        axes = {s['axis'] for s in steps}
+        self.assertTrue(any('alpha' in a for a in axes))
+        self.assertTrue(any('beta' in a for a in axes))
+
+    def test_motion_4p_seeded(self):
+        from processing.extract_composite import build_extract_motion_steps
+        import random
+
+        params = {'duration_ms': 60000, 'ramp_ms': 500}
+        steps = build_extract_motion_steps(params, 'mcb_extract_4p', rng=random.Random(2))
+        axes = {s['axis'] for s in steps}
+        self.assertEqual(axes, {'e1', 'e2', 'e3', 'e4'})
+
+    def test_other_events_untouched(self):
+        from processing.extract_composite import derive_extract_params, build_extract_motion_steps
+
+        params = {'duration_ms': 1000}
+        derive_extract_params(params, 'mcb_goodboy')
+        self.assertNotIn('hz_pulse_0', params)
+        self.assertEqual(build_extract_motion_steps(params, 'mcb_goodboy'), [])
+
+
 if __name__ == "__main__":
     print("Running Custom Event Processor Tests (New Architecture)...")
+    loader = unittest.TestLoader()
     suite = unittest.TestSuite()
-    suite.addTest(unittest.makeSuite(TestEventProcessor))
-    suite.addTest(unittest.makeSuite(TestOrgasmCountdownDerive))
+    suite.addTests(loader.loadTestsFromTestCase(TestEventProcessor))
+    suite.addTests(loader.loadTestsFromTestCase(TestOrgasmCountdownDerive))
+    suite.addTests(loader.loadTestsFromTestCase(TestExtractComposite))
     runner = unittest.TextTestRunner()
     result = runner.run(suite)
     print("Tests finished.")
