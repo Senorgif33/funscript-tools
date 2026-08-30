@@ -30,6 +30,7 @@ class TestChapterExport(unittest.TestCase):
 
     def test_format_event_display_name(self):
         self.assertEqual(format_event_display_name("mcb_extract_4p"), "MCB - Extract 4P")
+        self.assertEqual(format_event_display_name("mcb_extract_4p_beat"), "MCB - Extract 4P Beat")
         self.assertEqual(format_event_display_name("edge"), "General - Edge")
 
     def test_events_to_chapters_with_duration(self):

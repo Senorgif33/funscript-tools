@@ -285,6 +285,46 @@ class TestExtractComposite(unittest.TestCase):
         self.assertNotIn('hz_pulse_0', params)
         self.assertEqual(build_extract_motion_steps(params, 'mcb_goodboy'), [])
 
+    def test_l0_beats_every_second(self):
+        from processing.extract_composite import detect_l0_beats, every_nth_beat, switch_offsets_to_segments
+        import numpy as np
+
+        # Triangle stroke: peaks/valleys every 0.5s → beats at 0.5,1.0,1.5,... within window
+        t = np.linspace(0, 10, 201)
+        y = np.abs((t % 1.0) - 0.5)  # valleys at n, peaks at n+0.5
+        beats = detect_l0_beats(t, y, 0, 10000, min_interval_ms=50)
+        self.assertGreater(len(beats), 5)
+        switches = every_nth_beat(beats, 2)
+        self.assertEqual(switches, beats[::2])
+        segs = switch_offsets_to_segments(switches, 10000)
+        self.assertEqual(segs[0][0], 0)
+        self.assertEqual(segs[-1][0] + segs[-1][1], 10000)
+
+    def test_beat_motion_uses_switch_offsets(self):
+        from processing.extract_composite import build_extract_motion_steps
+        import random
+
+        params = {
+            'duration_ms': 60000,
+            'ramp_ms': 500,
+            'switch_offsets_ms': [0, 2000, 4000, 8000, 16000, 32000],
+        }
+        steps = build_extract_motion_steps(
+            params, 'mcb_extract_4p_beat', rng=random.Random(3)
+        )
+        axes = {s['axis'] for s in steps}
+        self.assertEqual(axes, {'e1', 'e2', 'e3', 'e4'})
+        # First non-ramp segment should start at a switch boundary
+        motion = [s for s in steps if s['axis'] == 'e1']
+        self.assertTrue(any(s['start_offset'] == 2000 for s in motion))
+
+    def test_beat_derive_params(self):
+        from processing.extract_composite import EXTRACT_BASE_MS, derive_extract_params
+
+        params = {'duration_ms': EXTRACT_BASE_MS}
+        derive_extract_params(params, 'mcb_extract_beat')
+        self.assertEqual(params['hz_pulse_4'], 120.0)
+
 
 if __name__ == "__main__":
     print("Running Custom Event Processor Tests (New Architecture)...")

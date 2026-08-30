@@ -17,6 +17,7 @@ from processing.chapter_export import (
     export_chapters,
 )
 from processing.extract_composite import (
+    EXTRACT_BEAT_EVENTS,
     build_extract_motion_steps,
     derive_extract_params,
 )
@@ -188,9 +189,31 @@ def _derive_orgasm_countdown_params(final_params: dict, event_name: str) -> None
     final_params['goodboy_duration_ms'] = int(round(goodboy_duration_ms))
 
 
-def _parse_and_validate_user_events(event_file_path: Path, event_definitions: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _resolve_l0_funscript(
+    event_file_path: Path,
+    funscripts_by_axis: Dict[str, Any],
+    base_name: str,
+) -> Any:
+    """L0 stroke for beat-sync extract: axis L0/l0, else base ``{name}.funscript``."""
+    for key in ("L0", "l0"):
+        if key in funscripts_by_axis:
+            return funscripts_by_axis[key]
+    base_path = event_file_path.parent / f"{base_name}.funscript"
+    if base_path.exists():
+        return Funscript.from_file(base_path)
+    return None
+
+
+def _parse_and_validate_user_events(
+    event_file_path: Path,
+    event_definitions: Dict[str, Any],
+    l0: Any = None,
+    warn_missing_l0: bool = False,
+) -> List[Dict[str, Any]]:
     """
     Parses a user's YAML event file and performs basic validation against definitions.
+
+    Optional ``l0`` Funscript supplies beat timing for extract beat-sync siblings.
     """
     try:
         with open(event_file_path, 'r') as f:
@@ -204,6 +227,9 @@ def _parse_and_validate_user_events(event_file_path: Path, event_definitions: Di
     user_events = user_data['events']
     if not isinstance(user_events, list):
         raise EventProcessorError("'events' key in user file must contain a list.")
+
+    l0_times = getattr(l0, "x", None) if l0 is not None else None
+    l0_values = getattr(l0, "y", None) if l0 is not None else None
 
     validated_events = []
     for i, user_event in enumerate(user_events):
@@ -274,8 +300,26 @@ def _parse_and_validate_user_events(event_file_path: Path, event_definitions: Di
             processed_step['start_offset'] = processed_step_start_offset
             processed_steps.append(processed_step)
 
-        # Hub–spoke motion baked at Apply (random spoke order)
-        processed_steps.extend(build_extract_motion_steps(final_params, event_name))
+        # Hub–spoke motion baked at Apply (random spoke order; beat siblings use L0)
+        motion_kwargs = {}
+        if event_name in EXTRACT_BEAT_EVENTS:
+            motion_kwargs = {
+                "l0_times_s": l0_times,
+                "l0_values": l0_values,
+                "event_start_ms": user_event["time"],
+            }
+            if (
+                warn_missing_l0
+                and l0_times is None
+                and final_params.get("switch_offsets_ms") is None
+            ):
+                print(
+                    f"WARNING: Event '{event_name}' has no L0 / base .funscript and no "
+                    f"switch_offsets_ms; pole dwells fall back to SCD ~dur."
+                )
+        processed_steps.extend(
+            build_extract_motion_steps(final_params, event_name, **motion_kwargs)
+        )
 
         user_event['final_params'] = final_params
         user_event['processed_steps'] = processed_steps
@@ -347,8 +391,11 @@ def process_events(event_file_path_str: str, perform_backup: bool, definitions_p
         backup_path = _backup_files(files_to_backup)
         print(f"Backup created at: {backup_path}")
 
-    # 6. Parse and validate user events
-    user_events = _parse_and_validate_user_events(event_file_path, event_definitions)
+    # 6. Parse and validate user events (L0 / base stroke for beat-sync extract)
+    l0 = _resolve_l0_funscript(event_file_path, funscripts_for_editor, base_name)
+    user_events = _parse_and_validate_user_events(
+        event_file_path, event_definitions, l0=l0, warn_missing_l0=True
+    )
 
     # 7. Apply events
     for user_event in user_events:

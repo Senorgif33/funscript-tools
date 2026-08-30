@@ -265,9 +265,15 @@ Version information for Restim Funscript Processor
         2. Rewrote mcb_extract_4p as E1 hub ↔ E2/E3/E4 one-hot spokes (same shell)
         3. Removed mcb_extract_additive and mcb_extract_4p_additive
         4. Spoke order randomized once at Apply (optional seed param)
+2.5.5 - MCB extract beat-sync siblings:
+        1. Added mcb_extract_beat / mcb_extract_4p_beat (same pulse/amp shell + hub–spoke)
+        2. Pole/pad dwells advance every 2nd L0 beat (base .funscript or L0/l0 axis),
+           or params.switch_offsets_ms from the events file; SCD ~dur fallback if sparse
+        3. Existing mcb_extract / mcb_extract_4p unchanged (SCD ~dur dwells)
+        4. Spoke RNG: consecutive spokes never repeat (hub still every other dwell)
 """
 
-__version__ = "2.5.4"
+__version__ = "2.5.5"
 __app_name__ = "Restim Funscript Processor"
 __description__ = "GUI application for processing funscript files for electrostimulation devices"
 __author__ = "Funscript Tools Project"
