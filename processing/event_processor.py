@@ -328,6 +328,113 @@ def _parse_and_validate_user_events(
     return sorted(validated_events, key=lambda x: x['time']) # Sort by time
 
 
+def _check_event_apply_params(
+    event_name: str,
+    event_time_ms: int,
+    user_params: Dict[str, Any],
+    event_definitions: Dict[str, Any],
+) -> List[str]:
+    """Return Apply-blocking issues for one timeline event (params/steps only)."""
+    issues: List[str] = []
+    where = f"t={int(event_time_ms)} ms"
+
+    if event_name not in event_definitions:
+        issues.append(
+            f"{where}: Event '{event_name}' is not defined in event_definitions.yml."
+        )
+        return issues
+
+    definition = event_definitions[event_name]
+    final_params = definition.get('default_params', {}).copy()
+    if user_params:
+        final_params.update(user_params)
+
+    try:
+        _derive_step_ratio_params(final_params, event_name)
+        _derive_orgasm_countdown_params(final_params, event_name)
+        derive_extract_params(final_params, event_name)
+    except (EventProcessorError, ValueError) as e:
+        issues.append(f"{where}: {e}")
+        return issues
+
+    for step_idx, step in enumerate(definition.get('steps') or [], start=1):
+        if 'operation' not in step:
+            issues.append(
+                f"{where}: Event '{event_name}': step {step_idx} is missing "
+                f"required 'operation' field."
+            )
+            continue
+        if 'axis' not in step:
+            issues.append(
+                f"{where}: Event '{event_name}': step {step_idx} "
+                f"(operation: '{step['operation']}') is missing required 'axis' field."
+            )
+            continue
+
+        operation = step['operation']
+        step_params_raw = step.get('params', {})
+        if operation == 'apply_linear_change' and 'start_value' not in step_params_raw:
+            issues.append(
+                f"{where}: Event '{event_name}': step {step_idx} uses "
+                f"'apply_linear_change' but is missing required 'start_value'."
+            )
+
+        for k, v in step_params_raw.items():
+            if isinstance(v, str) and v.startswith('$'):
+                token = v[1:]
+                if token not in final_params:
+                    issues.append(
+                        f"{where}: Token '{token}' not found in params for "
+                        f"event '{event_name}'."
+                    )
+
+        start_offset = step.get('start_offset', 0)
+        if isinstance(start_offset, str) and start_offset.startswith('$'):
+            token = start_offset[1:]
+            if token not in final_params:
+                issues.append(
+                    f"{where}: Token '{token}' not found in params for "
+                    f"event '{event_name}'."
+                )
+
+    return issues
+
+
+def collect_timeline_apply_issues(
+    events: List[Dict[str, Any]],
+    event_definitions: Dict[str, Any],
+) -> List[str]:
+    """Collect Apply-blocking validation messages for in-memory timeline events.
+
+    Same param/step checks as Apply (extract min duration, orgasm countdown min,
+    step_ratio, unknown names, missing tokens). Does not require funscripts.
+    Continues after the first failure so Save can list every problem.
+    """
+    issues: List[str] = []
+    for i, user_event in enumerate(events):
+        if not isinstance(user_event, dict):
+            issues.append(f"Event #{i + 1}: not a mapping.")
+            continue
+        if 'time' not in user_event or 'name' not in user_event:
+            issues.append(f"Event #{i + 1}: missing required key 'time' or 'name'.")
+            continue
+        if not isinstance(user_event['time'], (int, float)):
+            issues.append(
+                f"Event '{user_event['name']}' has invalid 'time' "
+                f"(must be a number in ms)."
+            )
+            continue
+        issues.extend(
+            _check_event_apply_params(
+                str(user_event['name']),
+                int(user_event['time']),
+                user_event.get('params') or {},
+                event_definitions,
+            )
+        )
+    return issues
+
+
 def process_events(event_file_path_str: str, perform_backup: bool, definitions_path: Path, volume_headroom: int = 10, config: dict = None, chapter_options: ChapterExportOptions = None) -> Tuple[str, List[str], Path]:
     """
     Main entry point for processing custom events.

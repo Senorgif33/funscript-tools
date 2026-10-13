@@ -1,16 +1,18 @@
-## What's New in v2.5.5
+## What's New in v2.5.6
 
 ### New Features
 
-1. **Beat-sync extract (3P)** — New event `mcb_extract_beat`: same pulse/amp shell and hub–spoke geometry as `mcb_extract`, but pole dwells advance every 2nd L0 beat (base `{name}.funscript` or `L0`/`l0` axis).
-2. **Beat-sync extract (4P)** — New event `mcb_extract_4p_beat`: same shell as `mcb_extract_4p`, with pad dwells on every 2nd L0 beat.
-3. **Manual switch offsets** — Optional `params.switch_offsets_ms` in the events file overrides L0-derived switch times (list or comma-separated ms offsets from event start).
-4. **Sparse-L0 fallback** — If there is no L0 / base stroke and no `switch_offsets_ms` (or beats are too sparse), dwells fall back to the original SCD `~dur` schedule. Apply warns when that happens.
+1. **Save validation warning** — Saving an events file warns (Save anyway?) when timeline events would fail Apply — e.g. extract min duration, orgasm-countdown too short, bad `step_ratio`, unknown event names, missing tokens.
+2. **Write Chapters** — Write OFS chapters to the base `.funscript` without applying event effects (Custom Event Builder button).
+3. **Apply to All** — Copy the open event's parameters onto every timeline event of the same type. Each event keeps its own start time and duration.
 
 ### Improvements
 
-1. **No-repeat spokes** — Hub (N / E1) still alternates every other dwell; consecutive spoke picks avoid repeating the previous spoke (applies to all extract variants, including the original SCD-timed events).
+1. **Beat extract min duration** — `*_beat` events allow `duration_ms` ≥ 25s (SCD extract stays 60s).
+2. **Dense linear overwrite** — `apply_linear_change` densifies timestamps (like modulation); single-point windows use the end value so short pad softs/holds clear correctly.
+3. **Per-event duration** — Save as Default does not store `duration_ms` or start time as the type default. Reset to Defaults restores effect parameters but keeps this event's duration.
 
 ### Unchanged
 
-1. Existing `mcb_extract` / `mcb_extract_4p` keep SCD absolute `~dur` dwell timing; only the new `*_beat` siblings use L0 beat sync.
+1. Existing `mcb_extract` / `mcb_extract_4p` / `*_beat` hub–spoke behavior.
+2. Overlap warning on Save (still separate from Apply validation).

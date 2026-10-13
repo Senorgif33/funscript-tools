@@ -325,6 +325,66 @@ class TestExtractComposite(unittest.TestCase):
         derive_extract_params(params, 'mcb_extract_beat')
         self.assertEqual(params['hz_pulse_4'], 120.0)
 
+    def test_beat_min_duration_25s(self):
+        from processing.extract_composite import derive_extract_params
+
+        ok = {'duration_ms': 25000}
+        derive_extract_params(ok, 'mcb_extract_4p_beat')
+        self.assertIn('hz_pulse_0', ok)
+
+        with self.assertRaises(ValueError):
+            derive_extract_params({'duration_ms': 24999}, 'mcb_extract_beat')
+
+        # SCD extract still requires 60s
+        with self.assertRaises(ValueError):
+            derive_extract_params({'duration_ms': 25000}, 'mcb_extract')
+
+
+class TestCollectTimelineApplyIssues(unittest.TestCase):
+    def test_extract_too_short_is_reported(self):
+        from processing.event_processor import collect_timeline_apply_issues
+
+        defs = {
+            'mcb_extract_4p_beat': {
+                'default_params': {'duration_ms': 265367, 'pulse_width': 65, 'ramp_ms': 500},
+                'steps': [],
+            }
+        }
+        events = [{
+            'time': 1000,
+            'name': 'mcb_extract_4p_beat',
+            'params': {'duration_ms': 10000},
+        }]
+        issues = collect_timeline_apply_issues(events, defs)
+        self.assertEqual(len(issues), 1)
+        self.assertIn('25000', issues[0])
+        self.assertIn('t=1000', issues[0])
+
+    def test_valid_extract_has_no_issues(self):
+        from processing.event_processor import collect_timeline_apply_issues
+
+        defs = {
+            'mcb_extract_4p_beat': {
+                'default_params': {'duration_ms': 265367, 'pulse_width': 65, 'ramp_ms': 500},
+                'steps': [],
+            }
+        }
+        events = [{
+            'time': 0,
+            'name': 'mcb_extract_4p_beat',
+            'params': {'duration_ms': 25000},
+        }]
+        self.assertEqual(collect_timeline_apply_issues(events, defs), [])
+
+    def test_unknown_event_is_reported(self):
+        from processing.event_processor import collect_timeline_apply_issues
+
+        issues = collect_timeline_apply_issues(
+            [{'time': 5, 'name': 'nope', 'params': {}}],
+            {},
+        )
+        self.assertTrue(any('not defined' in m for m in issues))
+
 
 if __name__ == "__main__":
     print("Running Custom Event Processor Tests (New Architecture)...")
@@ -333,6 +393,7 @@ if __name__ == "__main__":
     suite.addTests(loader.loadTestsFromTestCase(TestEventProcessor))
     suite.addTests(loader.loadTestsFromTestCase(TestOrgasmCountdownDerive))
     suite.addTests(loader.loadTestsFromTestCase(TestExtractComposite))
+    suite.addTests(loader.loadTestsFromTestCase(TestCollectTimelineApplyIssues))
     runner = unittest.TextTestRunner()
     result = runner.run(suite)
     print("Tests finished.")

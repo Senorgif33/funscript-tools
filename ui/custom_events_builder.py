@@ -33,8 +33,12 @@ if _sys.platform == 'win32':
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
 
-from processing.event_processor import process_events, EventProcessorError
-from processing.chapter_export import ChapterExportOptions
+from processing.event_processor import process_events, EventProcessorError, collect_timeline_apply_issues
+from processing.chapter_export import (
+    ChapterExportError,
+    ChapterExportOptions,
+    write_chapters_from_events_file,
+)
 from processing.event_display import format_event_display_name
 import ui.theme as _theme
 
@@ -70,6 +74,48 @@ def get_resource_path(relative_path: str) -> Path:
 
 # Path to the event definitions YAML file
 EVENT_DEFINITIONS_PATH = get_resource_path("config.event_definitions.yml")
+
+# Placement lives on each timeline event. duration_ms stays in default_params so
+# new events still have a length; Save as Default must not overwrite that field
+# from the event currently being edited. Start time is not a default param.
+_PLACEMENT_DEFAULT_KEYS = frozenset({"duration_ms", "time"})
+
+
+def params_for_saved_defaults(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop per-event placement before writing an event type's defaults."""
+    return {k: v for k, v in params.items() if k not in _PLACEMENT_DEFAULT_KEYS}
+
+
+def defaults_keeping_event_duration(
+    default_params: Dict[str, Any],
+    current_params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Type defaults with this event's duration_ms left unchanged."""
+    merged = dict(default_params)
+    if "duration_ms" in merged and "duration_ms" in current_params:
+        merged["duration_ms"] = current_params["duration_ms"]
+    return merged
+
+
+def apply_params_keeping_time(
+    events: List[Dict[str, Any]],
+    event_name: str,
+    new_params: Dict[str, Any],
+) -> int:
+    """Copy parameters onto every event of this name.
+
+    Each event keeps its start time and its own duration_ms.
+    """
+    count = 0
+    shared = {k: v for k, v in new_params.items() if k != "duration_ms"}
+    for ev in events:
+        if ev.get("name") != event_name:
+            continue
+        params = dict(ev.get("params") or {})
+        params.update(shared)
+        ev["params"] = params
+        count += 1
+    return count
 
 
 def _log_custom_events(msg: str) -> None:
@@ -432,12 +478,14 @@ class ParameterPanel(ttk.Frame):
         self.param_widgets = {}
         self.param_vars = {}  # Store variable objects
         self.current_time_ms = 0
+        self.current_event_number = None
         self.time_var = tk.IntVar(value=0)
 
         # Callbacks to parent dialog
         self.apply_callback = apply_callback
         self.reset_callback = reset_callback
         self.save_default_callback = None
+        self.apply_all_callback = None
 
         self.setup_ui()
         _theme.register(self._on_theme_change)
@@ -487,6 +535,7 @@ class ParameterPanel(ttk.Frame):
 
         ttk.Button(btn_frame, text="Reset to Defaults", command=self.reset_to_defaults).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="Apply Parameters", command=self.apply_parameters).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Apply to All", command=self._on_apply_all).pack(side=tk.LEFT, padx=2)
         ttk.Button(btn_frame, text="Save as Default", command=self._on_save_default).pack(side=tk.LEFT, padx=2)
 
         # Event steps preview section
@@ -525,6 +574,7 @@ class ParameterPanel(ttk.Frame):
         """Load and display parameters for an event"""
         self.current_event_name = event_name
         self.current_event_definition = event_definition
+        self.current_event_number = event_number
         default_params = event_definition.get('default_params', {})
         self.current_params = current_params if current_params else default_params.copy()
         self.current_time_ms = event_time_ms
@@ -749,10 +799,21 @@ class ParameterPanel(ttk.Frame):
         return self.time_var.get()
 
     def reset_to_defaults(self):
-        """Reset parameters to default values"""
-        if self.current_event_name and hasattr(self, 'current_event_definition'):
+        """Reset effect parameters. Keep this event's start time and duration."""
+        if self.current_event_name and self.current_event_definition:
             default_params = self.current_event_definition.get('default_params', {})
-            self.load_event_parameters(self.current_event_name, self.current_event_definition, default_params)
+            try:
+                current = self.get_parameter_values()
+            except Exception:
+                current = dict(self.current_params)
+            merged = defaults_keeping_event_duration(default_params, current)
+            self.load_event_parameters(
+                self.current_event_name,
+                self.current_event_definition,
+                merged,
+                event_time_ms=self.get_event_time(),
+                event_number=self.current_event_number,
+            )
 
     def update_steps_preview(self):
         """Update the event steps preview with current parameter values"""
@@ -810,6 +871,10 @@ class ParameterPanel(ttk.Frame):
     def _on_save_default(self):
         if self.save_default_callback:
             self.save_default_callback()
+
+    def _on_apply_all(self):
+        if self.apply_all_callback:
+            self.apply_all_callback()
 
 
 class CanvasTimelinePanel(ttk.Frame):
@@ -2851,6 +2916,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
 
         self.params_panel = ParameterPanel(self._params_tab, apply_callback=self.on_apply_parameters)
         self.params_panel.save_default_callback = self.on_save_event_defaults
+        self.params_panel.apply_all_callback = self.on_apply_parameters_to_all
         self.params_panel.pack(fill=tk.BOTH, expand=True)
 
         self._center_nb.bind('<<NotebookTabChanged>>', self._on_center_tab_changed)
@@ -3114,6 +3180,13 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self.apply_button = ttk.Button(self._action_frame, text="Apply Effects",
                                        command=self.on_apply_effects)
         self.apply_button.pack(side=tk.LEFT, padx=2)
+
+        self.write_chapters_button = ttk.Button(
+            self._action_frame,
+            text="Write Chapters",
+            command=self.on_write_chapters,
+        )
+        self.write_chapters_button.pack(side=tk.LEFT, padx=2)
 
         self.restore_button = ttk.Button(self._action_frame, text="Restore Backup",
                                          command=self.on_restore_backup, state='disabled')
@@ -3557,6 +3630,50 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             self.status_label.config(
                 text=f"Event #{new_index + 1} updated — {display_name} at {self._fmt_time(new_time)}")
 
+    def on_apply_parameters_to_all(self):
+        """Copy the current parameters onto every timeline event of this type.
+
+        Each event keeps its own start time and duration.
+        """
+        event_name = self.params_panel.current_event_name
+        if not event_name:
+            messagebox.showinfo("No Event Selected",
+                                "Select an event first.",
+                                parent=self)
+            return
+
+        new_params = self.params_panel.get_parameter_values()
+        matching = [
+            ev for ev in self.timeline_panel.events
+            if ev.get('name') == event_name
+        ]
+        if not matching:
+            messagebox.showinfo(
+                "No Matching Events",
+                "There are no events of this type on the timeline.",
+                parent=self,
+            )
+            return
+
+        display_name = format_event_display_name(event_name)
+        if not messagebox.askyesno(
+            "Apply to All",
+            f"Update {len(matching)} '{display_name}' event(s) with the current "
+            f"parameters?\n\nEach event keeps its start time and duration.",
+            parent=self,
+        ):
+            return
+
+        self.timeline_panel._push_history()
+        updated = apply_params_keeping_time(
+            self.timeline_panel.events, event_name, new_params
+        )
+        self.timeline_panel.refresh_display()
+        self.set_dirty(True)
+        self.status_label.config(
+            text=f"Updated {updated} {display_name} event(s); start times and durations unchanged"
+        )
+
     def on_duplicate_timeline_event(self):
         """Duplicate the selected timeline event."""
         idx = self.timeline_panel.selected_index
@@ -3649,9 +3766,14 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         if not event_name or event_name not in self.event_definitions:
             return
 
-        new_params = self.params_panel.get_parameter_values()
+        new_params = params_for_saved_defaults(self.params_panel.get_parameter_values())
+        if not new_params:
+            self.status_label.config(
+                text="Duration stays on each event; nothing else to save as default"
+            )
+            return
 
-        # Update in-memory definition
+        # Update in-memory definition. duration_ms already in the file is left as-is.
         self.event_definitions[event_name]['default_params'].update(new_params)
 
         # Write back to the definitions YAML file
@@ -3666,18 +3788,21 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             messagebox.showerror("Save Error", f"Failed to save defaults: {e}", parent=self)
             return
 
-        # Offer to update matching timeline events
+        # Offer to update matching timeline events (not their duration or start time).
         matching = [i for i, ev in enumerate(self.timeline_panel.events)
                     if ev['name'] == event_name]
         if matching:
             if messagebox.askyesno(
                 "Update Timeline Events",
                 f"Update {len(matching)} existing '{event_name}' event(s) on the "
-                f"timeline to use these new defaults?",
+                f"timeline to use these new defaults?\n\n"
+                f"Start time and duration of each event stay unchanged.",
                 parent=self
             ):
-                for i in matching:
-                    self.timeline_panel.events[i]['params'].update(new_params)
+                self.timeline_panel._push_history()
+                apply_params_keeping_time(
+                    self.timeline_panel.events, event_name, new_params
+                )
                 self.timeline_panel.refresh_display()
                 self.set_dirty(True)
 
@@ -3757,6 +3882,24 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             if not proceed:
                 return
 
+        apply_issues = collect_timeline_apply_issues(
+            self.timeline_panel.events,
+            self.event_definitions,
+        )
+        if apply_issues:
+            preview = "\n".join(f"• {msg}" for msg in apply_issues[:12])
+            if len(apply_issues) > 12:
+                preview += f"\n… and {len(apply_issues) - 12} more"
+            proceed = messagebox.askyesno(
+                "Apply Would Fail",
+                f"{len(apply_issues)} problem(s) would block Apply Effects:\n\n"
+                f"{preview}\n\nSave anyway?",
+                icon='warning',
+                parent=self,
+            )
+            if not proceed:
+                return
+
         if self.event_file_path:
             file_path = self.event_file_path
         else:
@@ -3814,9 +3957,83 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             video_duration_ms=self._video_duration_ms,
         )
 
+    def _ensure_events_file_saved(self) -> bool:
+        """Save dirty/unsaved events file; return False if user cancels or save fails."""
+        if not self.event_file_path or self.is_dirty:
+            if not self.event_file_path:
+                result = messagebox.askyesno(
+                    "Save Required",
+                    "Event file must be saved first. Save now?",
+                    parent=self,
+                )
+                if not result:
+                    return False
+            self.on_save_file()
+            if not self.event_file_path:
+                return False
+        return True
+
     # ------------------------------------------------------------------ #
     # Apply effects / restore backup                                       #
     # ------------------------------------------------------------------ #
+
+    def on_write_chapters(self):
+        """Write OFS chapters to the base .funscript without applying effects."""
+        if self._applying:
+            self.status_label.config(
+                text="Already applying — wait for the current run to finish."
+            )
+            return
+
+        if not self.timeline_panel.events:
+            messagebox.showwarning(
+                "No Events",
+                "Timeline is empty. Add events before writing chapters.",
+                parent=self,
+            )
+            return
+
+        if not self._ensure_events_file_saved():
+            return
+
+        base_name = Path(self.event_file_path).name.replace(
+            ".events.yml", ""
+        ).replace(".events.yaml", "")
+        base_funscript = Path(self.event_file_path).parent / f"{base_name}.funscript"
+        if not base_funscript.exists():
+            messagebox.showerror(
+                "Base Funscript Missing",
+                f"Cannot write chapters: {base_funscript.name} not found next to the "
+                f"events file.",
+                parent=self,
+            )
+            return
+
+        try:
+            options = ChapterExportOptions(
+                write_funscript=True,
+                video_duration_ms=self._video_duration_ms,
+            )
+            result = write_chapters_from_events_file(
+                self.event_file_path,
+                EVENT_DEFINITIONS_PATH,
+                options,
+            )
+            message = "\n".join(result.messages) if result.messages else "Chapters written."
+            _log_custom_events(f"Write Chapters: file={self.event_file_path} {message}")
+            messagebox.showinfo("Chapters Written", message, parent=self)
+            self.status_label.config(text="Chapters written to base funscript.")
+        except ChapterExportError as e:
+            messagebox.showerror("Chapter Export Error", str(e), parent=self)
+            self.status_label.config(text="Chapter write failed.")
+        except Exception as e:
+            tb = traceback.format_exc()
+            messagebox.showerror(
+                "Chapter Export Error",
+                f"Unexpected error: {e}\n\nDetails:\n{tb}",
+                parent=self,
+            )
+            self.status_label.config(text="Chapter write failed.")
 
     def on_apply_effects(self):
         if self._applying:
@@ -3844,17 +4061,8 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             if not proceed:
                 return
 
-        if not self.event_file_path or self.is_dirty:
-            if not self.event_file_path:
-                result = messagebox.askyesno(
-                    "Save Required",
-                    "Event file must be saved before applying. Save now?",
-                    parent=self)
-                if not result:
-                    return
-            self.on_save_file()
-            if not self.event_file_path:
-                return
+        if not self._ensure_events_file_saved():
+            return
 
         self._set_applying(True)
         event_names = [ev['name'] for ev in self.timeline_panel.events]
@@ -3870,6 +4078,10 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         state = 'disabled' if applying else 'normal'
         try:
             self.apply_button.config(state=state)
+        except tk.TclError:
+            pass
+        try:
+            self.write_chapters_button.config(state=state)
         except tk.TclError:
             pass
         try:

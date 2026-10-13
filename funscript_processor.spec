@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_all
 # ---------------------------------------------------------------------------
 # Version (read from version.py without importing the whole app)
 # ---------------------------------------------------------------------------
-with open('version.py') as _f:
+with open('version.py', encoding='utf-8') as _f:
     _m = re.search(r'__version__\s*=\s*"([^"]+)"', _f.read())
 _version = _m.group(1) if _m else 'unknown'
 _exe_name = f'RestimFunscriptProcessor-v{_version}'

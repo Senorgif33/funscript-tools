@@ -144,6 +144,61 @@ class TestChapterExport(unittest.TestCase):
             self.assertEqual(chapters[0]["name"], "General - Edge")
             self.assertTrue(any("replaced" in m.lower() for m in result.messages))
 
+    def test_write_chapters_from_events_file_leaves_axes_untouched(self):
+        from processing.chapter_export import write_chapters_from_events_file
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            base = tmp_path / "video.funscript"
+            axis = tmp_path / "video.volume.funscript"
+            events_path = tmp_path / "video.events.yml"
+            defs_path = tmp_path / "defs.yml"
+
+            base.write_text(json.dumps({
+                "actions": [{"at": 0, "pos": 50}, {"at": 20000, "pos": 50}],
+                "metadata": {
+                    "chapters": [{
+                        "name": "Old Scene",
+                        "startTime": "00:00:10.000",
+                        "endTime": "00:00:40.000",
+                    }]
+                },
+            }), encoding="utf-8")
+            axis_payload = {"actions": [{"at": 0, "pos": 80}, {"at": 5000, "pos": 20}]}
+            axis.write_text(json.dumps(axis_payload), encoding="utf-8")
+            events_path.write_text(
+                "events:\n"
+                "  - time: 1000\n"
+                "    name: edge\n"
+                "    params:\n"
+                "      duration_ms: 2000\n",
+                encoding="utf-8",
+            )
+            defs_path.write_text(
+                "definitions:\n"
+                "  edge:\n"
+                "    default_params:\n"
+                "      duration_ms: 1000\n",
+                encoding="utf-8",
+            )
+
+            result = write_chapters_from_events_file(
+                events_path,
+                defs_path,
+                ChapterExportOptions(write_funscript=False),  # forced True by API
+            )
+
+            base_data = json.loads(base.read_text(encoding="utf-8"))
+            chapters = base_data["metadata"]["chapters"]
+            self.assertEqual(len(chapters), 1)
+            self.assertEqual(chapters[0]["name"], "General - Edge")
+            self.assertEqual(chapters[0]["startTime"], "00:00:01.000")
+            self.assertEqual(chapters[0]["endTime"], "00:00:03.000")
+            self.assertTrue(any("replaced" in m.lower() for m in result.messages))
+
+            axis_after = json.loads(axis.read_text(encoding="utf-8"))
+            self.assertEqual(axis_after, axis_payload)
+
 
 if __name__ == "__main__":
     unittest.main()

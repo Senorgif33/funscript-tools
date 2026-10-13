@@ -172,6 +172,15 @@ class FunscriptEditor:
                                       mode: str = 'additive'):
         """Internal method to apply linear change to a single axis."""
         fs = self.funscripts[axis]
+        # Same densify as modulation: short overwrite windows
+        # otherwise often hit 0–1 sparse samples and never clear the previous pad.
+        if duration_ms > 0:
+            self._ensure_dense_timestamps(
+                axis,
+                start_time_ms / 1000.0,
+                (start_time_ms + duration_ms) / 1000.0,
+            )
+            fs = self.funscripts[axis]
         indices = self._get_indices_for_range(fs, start_time_ms, duration_ms)
 
         if indices.size == 0:
@@ -191,8 +200,10 @@ class FunscriptEditor:
         
         if indices.size > 1: # Only create a ramp if there's more than one point
             linear_values = np.linspace(normalized_start_value, normalized_end_value, indices.size)
-        else: # For single point or duration=0
-            linear_values = np.full(indices.size, normalized_start_value)
+        else:
+            # Sole sample in the window: use end so soft crossfades actually reach the target
+            # pad (start-only left the previous pad high while later spokes wrote).
+            linear_values = np.full(indices.size, normalized_end_value)
 
         # Apply based on mode
         if mode == 'additive':

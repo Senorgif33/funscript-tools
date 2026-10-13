@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
+
+import yaml
 
 from funscript import Funscript
 from processing.event_display import format_event_display_name
@@ -224,3 +226,57 @@ def export_chapters(
         )
 
     return result
+
+
+def _load_definitions_for_chapters(definitions_path: Path) -> Dict[str, Any]:
+    try:
+        with open(definitions_path, "r", encoding="utf-8") as f:
+            config_data = yaml.safe_load(f)
+    except Exception as e:
+        raise ChapterExportError(
+            f"Failed to load event definitions from {definitions_path}: {e}"
+        ) from e
+    if not isinstance(config_data, dict) or "definitions" not in config_data:
+        raise ChapterExportError(
+            "Event definitions file must contain a top-level 'definitions' key."
+        )
+    return config_data["definitions"]
+
+
+def _load_raw_events_from_file(event_file_path: Path) -> List[Dict[str, Any]]:
+    try:
+        with open(event_file_path, "r", encoding="utf-8") as f:
+            user_data = yaml.safe_load(f)
+    except Exception as e:
+        raise ChapterExportError(
+            f"Failed to parse user event YAML file '{event_file_path.name}': {e}"
+        ) from e
+    if not isinstance(user_data, dict) or "events" not in user_data:
+        raise ChapterExportError("User event file must contain a top-level 'events' key.")
+    events = user_data["events"]
+    if not isinstance(events, list):
+        raise ChapterExportError("'events' key in user file must contain a list.")
+    return events
+
+
+def write_chapters_from_events_file(
+    event_file_path: Union[str, Path],
+    definitions_path: Path,
+    options: Optional[ChapterExportOptions] = None,
+) -> ChapterExportResult:
+    """Write OFS chapters to the base .funscript without applying event effects.
+
+    Replaces any existing chapters in ``{base}.funscript`` metadata. Does not load
+    or modify axis funscripts (volume, pulse, motion, etc.).
+    """
+    event_file_path = Path(event_file_path)
+    if options is None:
+        options = ChapterExportOptions(write_funscript=True)
+    else:
+        options = replace(options, write_funscript=True)
+
+    event_definitions = _load_definitions_for_chapters(definitions_path)
+    raw_events = _load_raw_events_from_file(event_file_path)
+    enriched = enrich_events_from_timeline(raw_events, event_definitions)
+    base_name = event_file_base_name(event_file_path)
+    return export_chapters(enriched, base_name, event_file_path.parent, options)

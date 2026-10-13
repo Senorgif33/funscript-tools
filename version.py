@@ -271,9 +271,16 @@ Version information for Restim Funscript Processor
            or params.switch_offsets_ms from the events file; SCD ~dur fallback if sparse
         3. Existing mcb_extract / mcb_extract_4p unchanged (SCD ~dur dwells)
         4. Spoke RNG: consecutive spokes never repeat (hub still every other dwell)
+2.5.6 - Custom Event Builder save checks, chapters, and beat extract length:
+        1. Save warns when timeline events would fail Apply
+        2. Write Chapters writes OFS chapters without applying effects
+        3. Apply to All copies parameters; each event keeps start time and duration
+        4. Save as Default and Reset leave each event duration alone
+        5. Beat extract min duration is 25s; SCD extract stays 60s
+        6. apply_linear_change densifies short overwrite windows
 """
 
-__version__ = "2.5.5"
+__version__ = "2.5.6"
 __app_name__ = "Restim Funscript Processor"
 __description__ = "GUI application for processing funscript files for electrostimulation devices"
 __author__ = "Funscript Tools Project"

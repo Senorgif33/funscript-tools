@@ -1691,6 +1691,7 @@ definitions:
   # Sibling of mcb_extract: same pulse/amp/width shell and hub–spoke geometry.
   # Pole dwells advance every 2nd L0 beat (base .funscript or L0/l0 axis), or use
   # params.switch_offsets_ms from the events file. Falls back to SCD ~dur if sparse.
+  # Min duration 25000 ms (beat siblings only; SCD extract stays 60000).
   # Motion baked at Apply by processing/extract_composite.py.
 
   mcb_extract_beat:
