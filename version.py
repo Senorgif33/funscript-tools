@@ -286,6 +286,7 @@ Version information for Restim Funscript Processor
         5. AppImage/frozen Linux writes config under XDG ~/.config/RestimFunscriptProcessor
         6. Open Config Folder button opens the active config directory
         7. App icon: Restim mark with red wrench (assets/icon.png / icon.ico)
+        8. Running AppImage sets Tk iconphoto so the panel/taskbar shows the app icon
 """
 
 __version__ = "2.5.7"

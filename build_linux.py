@@ -124,6 +124,9 @@ def build_linux_binary():
     if Path("assets/icon.png").exists():
         cmd.insert(-1, "--icon")
         cmd.insert(-1, "assets/icon.png")
+        # Bundle PNG so the running Tk window can set panel/taskbar iconphoto
+        cmd.insert(-1, "--add-data")
+        cmd.insert(-1, "assets/icon.png:assets")
 
     print("Running PyInstaller...")
     print(" ".join(cmd))
@@ -179,6 +182,7 @@ Name=Restim Funscript Processor
 Comment=Process funscript files for electrostimulation devices
 Exec=RestimFunscriptProcessor/RestimFunscriptProcessor
 Icon=RestimFunscriptProcessor
+StartupWMClass=RestimFunscriptProcessor
 Categories=AudioVideo;Audio;
 Version=1.0
 """)
@@ -188,6 +192,7 @@ Version=1.0
     source_icon = Path("assets/icon.png")
     if source_icon.exists():
         shutil.copy2(source_icon, icon_path)
+        shutil.copy2(source_icon, appdir / ".DirIcon")
         # Also install into hicolor for desktop environments
         for size in (256, 128, 64, 48, 32):
             hicolor = appdir / "usr" / "share" / "icons" / "hicolor" / f"{size}x{size}" / "apps"

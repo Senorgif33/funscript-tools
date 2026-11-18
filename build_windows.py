@@ -80,6 +80,9 @@ def build_windows_exe():
         if Path("assets/icon.ico").exists():
             cmd.insert(-1, "--icon")
             cmd.insert(-1, "assets/icon.ico")
+        if Path("assets/icon.png").exists():
+            cmd.insert(-1, "--add-data")
+            cmd.insert(-1, "assets/icon.png;assets")
 
     print("Running PyInstaller...")
     print(" ".join(cmd))

@@ -32,6 +32,7 @@ class MainWindow:
         self.root.title("Restim Funscript Processor")
         self.root.geometry("850x735")
         self.root.resizable(True, True)
+        self._apply_window_icon()
 
         # Configuration
         self.config_manager = ConfigManager()
@@ -55,6 +56,44 @@ class MainWindow:
         if dark:
             self._dark_btn.config(text='\u2600 Light')
             self.drop_zone.config(bg='#2d2d3f')
+
+    def _apply_window_icon(self):
+        """Set taskbar/panel icon from bundled assets/icon.png."""
+        from config import get_bundled_resource_path
+
+        icon_path = get_bundled_resource_path("assets/icon.png")
+        if not icon_path.exists():
+            # Source checkout may keep icon at assets/icon.png next to repo root
+            alt = Path(__file__).parent.parent / "assets" / "icon.png"
+            icon_path = alt if alt.exists() else icon_path
+        if not icon_path.exists():
+            return
+
+        try:
+            # Keep references so Tk does not garbage-collect the images
+            self._icon_photos = []
+            try:
+                from PIL import Image, ImageTk
+                base = Image.open(icon_path).convert("RGBA")
+                for size in (256, 128, 64, 48, 32, 16):
+                    img = base.resize((size, size), Image.Resampling.LANCZOS)
+                    photo = ImageTk.PhotoImage(img)
+                    self._icon_photos.append(photo)
+            except Exception:
+                photo = tk.PhotoImage(file=str(icon_path))
+                self._icon_photos.append(photo)
+
+            if self._icon_photos:
+                self.root.iconphoto(True, *self._icon_photos)
+        except Exception:
+            pass
+
+        # Help desktop shells match this window to the .desktop StartupWMClass
+        try:
+            self.root.tk.call("tk", "appname", "RestimFunscriptProcessor")
+            self.root.wm_attributes("-type", "normal")
+        except tk.TclError:
+            pass
 
     def setup_ui(self):
         """Setup the main user interface."""
