@@ -232,7 +232,7 @@ class TestExtractComposite(unittest.TestCase):
         from processing.extract_composite import EXTRACT_BASE_MS, derive_extract_params
 
         params = {'duration_ms': EXTRACT_BASE_MS}
-        derive_extract_params(params, 'mcb_extract')
+        derive_extract_params(params, 'mcb_extract_dual')
         self.assertEqual(params['offset_pulse_0_ms'], 0)
         self.assertEqual(params['hz_pulse_0'], 60.0)
         self.assertEqual(params['hz_pulse_4'], 120.0)
@@ -248,34 +248,42 @@ class TestExtractComposite(unittest.TestCase):
         from processing.extract_composite import EXTRACT_BASE_MS, derive_extract_params
 
         params = {'duration_ms': EXTRACT_BASE_MS // 2}
-        derive_extract_params(params, 'mcb_extract_4p')
+        derive_extract_params(params, 'mcb_extract_dual')
         self.assertEqual(params['offset_pulse_1_ms'], int(round((EXTRACT_BASE_MS // 2) * 0.353)))
 
     def test_too_short_raises(self):
         from processing.extract_composite import derive_extract_params
 
         with self.assertRaises(ValueError):
-            derive_extract_params({'duration_ms': 59999}, 'mcb_extract')
+            derive_extract_params({'duration_ms': 59999}, 'mcb_extract_dual')
 
-    def test_motion_3p_seeded(self):
-        from processing.extract_composite import build_extract_motion_steps
+    def test_motion_dual_both_geometries(self):
+        from processing.extract_composite import (
+            _build_3p_motion,
+            _build_4p_motion,
+            build_extract_motion_steps,
+            resolve_extract_segments,
+        )
         import random
 
         params = {'duration_ms': 60000, 'ramp_ms': 500, 'seed': 1}
-        steps = build_extract_motion_steps(params, 'mcb_extract', rng=random.Random(1))
-        self.assertGreater(len(steps), 10)
+        steps = build_extract_motion_steps(params, 'mcb_extract_dual')
         axes = {s['axis'] for s in steps}
         self.assertTrue(any('alpha' in a for a in axes))
         self.assertTrue(any('beta' in a for a in axes))
+        self.assertTrue({'e1', 'e2', 'e3', 'e4'} <= axes)
 
-    def test_motion_4p_seeded(self):
-        from processing.extract_composite import build_extract_motion_steps
-        import random
-
-        params = {'duration_ms': 60000, 'ramp_ms': 500}
-        steps = build_extract_motion_steps(params, 'mcb_extract_4p', rng=random.Random(2))
-        axes = {s['axis'] for s in steps}
-        self.assertEqual(axes, {'e1', 'e2', 'e3', 'e4'})
+        segments = resolve_extract_segments(dict(params), 'mcb_extract_dual')
+        solo3 = _build_3p_motion(60000, random.Random(1), params, segments)
+        solo4 = _build_4p_motion(60000, random.Random(1), params, segments)
+        self.assertEqual(
+            [s for s in steps if s['axis'] not in ('e1', 'e2', 'e3', 'e4')],
+            solo3,
+        )
+        self.assertEqual(
+            [s for s in steps if s['axis'] in ('e1', 'e2', 'e3', 'e4')],
+            solo4,
+        )
 
     def test_other_events_untouched(self):
         from processing.extract_composite import derive_extract_params, build_extract_motion_steps
@@ -284,6 +292,23 @@ class TestExtractComposite(unittest.TestCase):
         derive_extract_params(params, 'mcb_goodboy')
         self.assertNotIn('hz_pulse_0', params)
         self.assertEqual(build_extract_motion_steps(params, 'mcb_goodboy'), [])
+
+    def test_yaml_shell_written_once(self):
+        import yaml
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        data = yaml.safe_load((root / 'config.event_definitions.yml').read_text(encoding='utf-8'))
+        defs = data['definitions']
+        for old in ('mcb_extract', 'mcb_extract_4p', 'mcb_extract_beat', 'mcb_extract_4p_beat'):
+            self.assertNotIn(old, defs)
+        self.assertIn('corrupt_4p', defs)
+        for name in ('mcb_extract_dual', 'mcb_extract_beat_dual'):
+            axes = [step['axis'] for step in defs[name]['steps']]
+            self.assertEqual(axes.count('pulse_width'), 1)
+            self.assertEqual(sum(a == 'pulse_frequency' for a in axes), 5)
+            self.assertEqual(sum(a.startswith('volume') for a in axes), 10)
+            self.assertFalse(any('alpha' in a or 'beta' in a or a.startswith('e') for a in axes))
 
     def test_l0_beats_every_second(self):
         from processing.extract_composite import detect_l0_beats, every_nth_beat, switch_offsets_to_segments
@@ -310,34 +335,36 @@ class TestExtractComposite(unittest.TestCase):
             'switch_offsets_ms': [0, 2000, 4000, 8000, 16000, 32000],
         }
         steps = build_extract_motion_steps(
-            params, 'mcb_extract_4p_beat', rng=random.Random(3)
+            params, 'mcb_extract_beat_dual', rng=random.Random(3)
         )
         axes = {s['axis'] for s in steps}
-        self.assertEqual(axes, {'e1', 'e2', 'e3', 'e4'})
-        # First non-ramp segment should start at a switch boundary
-        motion = [s for s in steps if s['axis'] == 'e1']
-        self.assertTrue(any(s['start_offset'] == 2000 for s in motion))
+        self.assertTrue(any('alpha' in a for a in axes))
+        self.assertTrue({'e1', 'e2', 'e3', 'e4'} <= axes)
+        alpha_offs = {s['start_offset'] for s in steps if 'alpha' in s['axis']}
+        e1_offs = {s['start_offset'] for s in steps if s['axis'] == 'e1'}
+        self.assertIn(2000, alpha_offs)
+        self.assertIn(2000, e1_offs)
 
     def test_beat_derive_params(self):
         from processing.extract_composite import EXTRACT_BASE_MS, derive_extract_params
 
         params = {'duration_ms': EXTRACT_BASE_MS}
-        derive_extract_params(params, 'mcb_extract_beat')
+        derive_extract_params(params, 'mcb_extract_beat_dual')
         self.assertEqual(params['hz_pulse_4'], 120.0)
 
     def test_beat_min_duration_25s(self):
         from processing.extract_composite import derive_extract_params
 
         ok = {'duration_ms': 25000}
-        derive_extract_params(ok, 'mcb_extract_4p_beat')
+        derive_extract_params(ok, 'mcb_extract_beat_dual')
         self.assertIn('hz_pulse_0', ok)
 
         with self.assertRaises(ValueError):
-            derive_extract_params({'duration_ms': 24999}, 'mcb_extract_beat')
+            derive_extract_params({'duration_ms': 24999}, 'mcb_extract_beat_dual')
 
         # SCD extract still requires 60s
         with self.assertRaises(ValueError):
-            derive_extract_params({'duration_ms': 25000}, 'mcb_extract')
+            derive_extract_params({'duration_ms': 25000}, 'mcb_extract_dual')
 
 
 class TestCollectTimelineApplyIssues(unittest.TestCase):
@@ -345,14 +372,14 @@ class TestCollectTimelineApplyIssues(unittest.TestCase):
         from processing.event_processor import collect_timeline_apply_issues
 
         defs = {
-            'mcb_extract_4p_beat': {
+            'mcb_extract_beat_dual': {
                 'default_params': {'duration_ms': 265367, 'pulse_width': 65, 'ramp_ms': 500},
                 'steps': [],
             }
         }
         events = [{
             'time': 1000,
-            'name': 'mcb_extract_4p_beat',
+            'name': 'mcb_extract_beat_dual',
             'params': {'duration_ms': 10000},
         }]
         issues = collect_timeline_apply_issues(events, defs)
@@ -364,14 +391,14 @@ class TestCollectTimelineApplyIssues(unittest.TestCase):
         from processing.event_processor import collect_timeline_apply_issues
 
         defs = {
-            'mcb_extract_4p_beat': {
+            'mcb_extract_beat_dual': {
                 'default_params': {'duration_ms': 265367, 'pulse_width': 65, 'ramp_ms': 500},
                 'steps': [],
             }
         }
         events = [{
             'time': 0,
-            'name': 'mcb_extract_4p_beat',
+            'name': 'mcb_extract_beat_dual',
             'params': {'duration_ms': 25000},
         }]
         self.assertEqual(collect_timeline_apply_issues(events, defs), [])
@@ -386,6 +413,24 @@ class TestCollectTimelineApplyIssues(unittest.TestCase):
         self.assertTrue(any('not defined' in m for m in issues))
 
 
+class TestEmptyEventsFile(unittest.TestCase):
+    def test_writes_empty_template_beside_funscript(self):
+        from processing.event_processor import events_path_for_funscript, write_empty_events_file
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            funscript_path = root / "clip.funscript"
+            funscript_path.write_text("{}", encoding="utf-8")
+            events_path = events_path_for_funscript(funscript_path)
+            self.assertEqual(events_path, root / "clip.events.yml")
+            write_empty_events_file(events_path)
+            text = events_path.read_text(encoding="utf-8")
+            data = yaml.safe_load(text) or {}
+            self.assertEqual(data.get("events") or [], [])
+            self.assertIn("Custom Events File", text)
+            self.assertIn("events:", text)
+
+
 if __name__ == "__main__":
     print("Running Custom Event Processor Tests (New Architecture)...")
     loader = unittest.TestLoader()
@@ -394,6 +439,7 @@ if __name__ == "__main__":
     suite.addTests(loader.loadTestsFromTestCase(TestOrgasmCountdownDerive))
     suite.addTests(loader.loadTestsFromTestCase(TestExtractComposite))
     suite.addTests(loader.loadTestsFromTestCase(TestCollectTimelineApplyIssues))
+    suite.addTests(loader.loadTestsFromTestCase(TestEmptyEventsFile))
     runner = unittest.TextTestRunner()
     result = runner.run(suite)
     print("Tests finished.")

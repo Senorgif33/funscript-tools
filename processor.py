@@ -18,6 +18,7 @@ from processing.motion_axis_generation import (
     generate_motion_axes, copy_existing_axis_files, validate_motion_axis_config
 )
 from processing.phase_shift_generation import generate_all_phase_shifted_funscripts
+from processing.event_processor import write_empty_events_file
 
 
 class RestimProcessor:
@@ -306,24 +307,8 @@ class RestimProcessor:
 
     def _create_events_template(self, events_file_path: Path):
         """Create an empty events.yml template file with helpful comments."""
-        template_content = """# Custom Events File
-# Add timed events to modify the generated funscript files.
-# All time values are in MILLISECONDS.
-# Event names must match definitions in config.event_definitions.yml
-#
-# Example event structure:
-# events:
-#   - time: 60000        # Event at 1 minute (60,000 ms)
-#     name: edge         # Event name from event_definitions.yml
-#     params:            # Optional parameter overrides
-#       duration_ms: 15000
-
-events:
-  # Add your custom events here
-"""
         try:
-            with open(events_file_path, 'w', encoding='utf-8') as f:
-                f.write(template_content)
+            write_empty_events_file(events_file_path)
         except Exception as e:
             # Don't fail the entire process if template creation fails
             print(f"Warning: Failed to create events template: {str(e)}")

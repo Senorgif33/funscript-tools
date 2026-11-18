@@ -33,47 +33,29 @@ if _sys.platform == 'win32':
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
 
-from processing.event_processor import process_events, EventProcessorError, collect_timeline_apply_issues
+from processing.event_processor import (
+    process_events,
+    EventProcessorError,
+    collect_timeline_apply_issues,
+    events_path_for_funscript,
+    write_empty_events_file,
+)
 from processing.chapter_export import (
     ChapterExportError,
     ChapterExportOptions,
     write_chapters_from_events_file,
 )
 from processing.event_display import format_event_display_name
+from config import (
+    ensure_event_definitions_writable,
+    resolve_event_definitions_path,
+)
 import ui.theme as _theme
 
 
-def get_resource_path(relative_path: str) -> Path:
-    """
-    Get absolute path to resource, works for dev and PyInstaller.
-
-    When running as a bundled exe, checks the exe directory first for external config files,
-    then falls back to the bundled resource in the temporary extraction directory.
-
-    Args:
-        relative_path: Path relative to the application root (e.g., "config.event_definitions.yml")
-
-    Returns:
-        Path: Absolute path to the resource file
-    """
-    # Check if running as PyInstaller bundle
-    if getattr(sys, 'frozen', False):
-        # Running as compiled exe - check exe directory first
-        exe_dir = Path(sys.executable).parent
-        external_file = exe_dir / relative_path
-        if external_file.exists():
-            return external_file
-
-        # Fall back to bundled resource in temp directory
-        base_path = Path(sys._MEIPASS)
-        return base_path / relative_path
-    else:
-        # Running from source - use standard path resolution
-        return Path(__file__).parent.parent / relative_path
-
-
-# Path to the event definitions YAML file
-EVENT_DEFINITIONS_PATH = get_resource_path("config.event_definitions.yml")
+def get_event_definitions_path() -> Path:
+    """Current readable event-definitions path (user copy or bundled)."""
+    return resolve_event_definitions_path(for_write=False)
 
 # Placement lives on each timeline event. duration_ms stays in default_params so
 # new events still have a length; Save as Default must not overwrite that field
@@ -2768,7 +2750,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
 
         # Load event definitions
         try:
-            with open(EVENT_DEFINITIONS_PATH, 'r') as f:
+            with open(get_event_definitions_path(), 'r') as f:
                 config_data = yaml.safe_load(f)
             self.event_definitions    = config_data.get('definitions', {})
             self.event_groups         = config_data.get('groups', [])
@@ -3136,6 +3118,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         file_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
 
         ttk.Button(self._file_frame, text="New",  command=self.on_new_file).pack(side=tk.LEFT, padx=2)
+        ttk.Button(self._file_frame, text="Create file", command=self.on_create_file).pack(side=tk.LEFT, padx=2)
         ttk.Button(self._file_frame, text="Load", command=self.on_load_file).pack(side=tk.LEFT, padx=2)
         ttk.Button(self._file_frame, text="Save", command=self.on_save_file).pack(side=tk.LEFT, padx=2)
 
@@ -3497,6 +3480,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self.config.setdefault('ui', {})['favorite_events'] = list(valid)
         try:
             path = resolve_config_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
             data: Dict[str, Any] = {}
             if path.exists():
                 with open(path, 'r', encoding='utf-8') as f:
@@ -3708,6 +3692,55 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self.params_panel.title_label.config(text="Parameters")
         self.status_label.config(text="New timeline created")
 
+    def on_create_file(self):
+        """Write an empty events file beside a chosen funscript, then load it."""
+        dialog_kwargs = {
+            "title": "Choose Funscript for Events File",
+            "filetypes": [("Funscript files", "*.funscript"), ("All files", "*.*")],
+            "parent": self,
+        }
+        if self.last_processed_directory and self.last_processed_filename:
+            dialog_kwargs["initialdir"] = str(self.last_processed_directory)
+            dialog_kwargs["initialfile"] = f"{self.last_processed_filename}.funscript"
+
+        file_path = filedialog.askopenfilename(**dialog_kwargs)
+        if not file_path:
+            return
+
+        funscript_path = Path(file_path)
+        events_path = events_path_for_funscript(funscript_path)
+        created = not events_path.exists()
+        if created:
+            try:
+                write_empty_events_file(events_path)
+            except Exception as e:
+                messagebox.showerror(
+                    "Create Error",
+                    f"Failed to create event file: {e}",
+                    parent=self,
+                )
+                return
+
+        self.last_processed_filename = funscript_path.stem
+        self.last_processed_directory = funscript_path.parent
+        try:
+            count = self._open_events_file(events_path)
+        except Exception as e:
+            messagebox.showerror("Load Error", f"Failed to load event file: {e}", parent=self)
+            return
+
+        self._load_funscript_duration()
+        if created:
+            self.status_label.config(text=f"Created empty event file: {events_path.name}")
+        elif count:
+            self.status_label.config(
+                text=f"Loaded {count} events from existing file: {events_path.name}"
+            )
+        else:
+            self.status_label.config(
+                text=f"Loaded existing empty event file: {events_path.name}"
+            )
+
     def on_load_file(self):
         file_path = filedialog.askopenfilename(
             title="Load Event File",
@@ -3718,21 +3751,26 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             return
 
         try:
-            with open(file_path, 'r') as f:
-                data = yaml.safe_load(f)
-            events = data.get('events') or []
-            if 'headroom' in data:
-                self.headroom_var.set(data['headroom'])
-            self.timeline_panel.load_events_from_yaml(events)
-            self.event_file_path = Path(file_path)
-            self.event_file_var.set(str(self.event_file_path))
-            self.set_dirty(False)
-            self.current_editing_index = None
-            self.params_panel.show_placeholder()
-            self.status_label.config(text=f"Loaded {len(events)} events from file")
-            self._try_load_matching_funscript(self.event_file_path)
+            count = self._open_events_file(file_path)
+            self.status_label.config(text=f"Loaded {count} events from file")
         except Exception as e:
             messagebox.showerror("Load Error", f"Failed to load event file: {e}", parent=self)
+
+    def _open_events_file(self, file_path) -> int:
+        """Load an events YAML into the timeline. Returns the event count."""
+        with open(file_path, 'r') as f:
+            data = yaml.safe_load(f) or {}
+        events = data.get('events') or []
+        if 'headroom' in data:
+            self.headroom_var.set(data['headroom'])
+        self.timeline_panel.load_events_from_yaml(events)
+        self.event_file_path = Path(file_path)
+        self.event_file_var.set(str(self.event_file_path))
+        self.set_dirty(False)
+        self.current_editing_index = None
+        self.params_panel.show_placeholder()
+        self._try_load_matching_funscript(self.event_file_path)
+        return len(events)
 
     def _try_load_matching_funscript(self, events_path: Path):
         """Given an events file path, find and load the sibling .funscript file."""
@@ -3776,12 +3814,13 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         # Update in-memory definition. duration_ms already in the file is left as-is.
         self.event_definitions[event_name]['default_params'].update(new_params)
 
-        # Write back to the definitions YAML file
+        # Write back to the definitions YAML file (user config dir when frozen)
         try:
-            with open(EVENT_DEFINITIONS_PATH, 'r') as f:
+            defs_path = ensure_event_definitions_writable()
+            with open(defs_path, 'r') as f:
                 config_data = yaml.safe_load(f)
             config_data['definitions'][event_name]['default_params'].update(new_params)
-            with open(EVENT_DEFINITIONS_PATH, 'w') as f:
+            with open(defs_path, 'w') as f:
                 yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
             self.status_label.config(text=f"Saved default params for '{event_name}'")
         except Exception as e:
@@ -4016,7 +4055,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             )
             result = write_chapters_from_events_file(
                 self.event_file_path,
-                EVENT_DEFINITIONS_PATH,
+                get_event_definitions_path(),
                 options,
             )
             message = "\n".join(result.messages) if result.messages else "Chapters written."
@@ -4098,7 +4137,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             success_message, _, backup_path = process_events(
                 str(self.event_file_path),
                 self.backup_var.get(),
-                EVENT_DEFINITIONS_PATH,
+                get_event_definitions_path(),
                 self.headroom_var.get(),
                 self.config,
                 self._get_chapter_export_options(),

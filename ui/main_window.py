@@ -13,7 +13,7 @@ except ImportError:
     HAS_DND = False
 
 sys.path.append(str(Path(__file__).parent.parent))
-from config import ConfigManager
+from config import ConfigManager, open_user_config_folder
 from processor import RestimProcessor
 from ui.parameter_tabs import ParameterTabs
 from ui.conversion_tabs import ConversionTabs
@@ -133,6 +133,7 @@ class MainWindow:
         ttk.Button(buttons_frame, text="Funscript Generator", command=self.open_funscript_generator).pack(side=tk.LEFT, padx=(0, 10))
 
         ttk.Button(buttons_frame, text="Save Config", command=self.save_config).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(buttons_frame, text="Open Config Folder", command=self.open_config_folder).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(buttons_frame, text="Reset to Defaults", command=self.reset_config).pack(side=tk.LEFT, padx=(0, 10))
 
         self._dark_btn = ttk.Button(buttons_frame, text='\u263d Dark', width=8, command=self._toggle_dark_mode)
@@ -531,6 +532,11 @@ class MainWindow:
                 messagebox.showerror("Error", "Failed to save configuration file.")
         else:
             messagebox.showerror("Error", "Invalid configuration values.")
+
+    def open_config_folder(self):
+        """Open the folder that holds config.json and event definitions."""
+        if not open_user_config_folder():
+            messagebox.showerror("Error", "Could not open config folder.")
 
     def reset_config(self):
         """Reset configuration to defaults."""

@@ -1,11 +1,12 @@
-"""SCD Relentless→Extract→overload composite for mcb_extract / mcb_extract_4p.
+"""SCD Relentless→Extract→overload composite for mcb_extract_dual.
 
-Also beat-sync siblings (mcb_extract_beat / mcb_extract_4p_beat): same hub–spoke
-geometry and pulse/amp shell; pole dwells advance every 2nd L0 beat (or use
-switch_offsets_ms from the events file). Fallback to SCD ~dur when no beats.
+Also mcb_extract_beat_dual: same hub–spoke geometry and pulse/amp shell.
+Each event bakes 3P (alpha/beta) and 4P (e1–e4) motion together.
+Beat dwells advance every 2nd L0 beat (or use switch_offsets_ms from the
+events file). Fallback to SCD ~dur when no beats.
 
 Fresh derivation from mistress_and_box.scd polesCtrl hub–spoke pattern.
-Proportional cue timings; absolute ~dur dwells (SCD events); Apply/expand-time RNG.
+Proportional cue timings; absolute ~dur dwells (SCD event); Apply/expand-time RNG.
 """
 from __future__ import annotations
 
@@ -21,11 +22,8 @@ EXTRACT_MIN_MS = 60_000
 # Beat-sync siblings can be shorter (tempo from L0; less need for full SCD arc).
 EXTRACT_BEAT_MIN_MS = 25_000
 
-EXTRACT_SCD_EVENTS = frozenset({"mcb_extract", "mcb_extract_4p"})
-EXTRACT_BEAT_EVENTS = frozenset({
-    "mcb_extract_beat",
-    "mcb_extract_4p_beat",
-})
+EXTRACT_SCD_EVENTS = frozenset({"mcb_extract_dual"})
+EXTRACT_BEAT_EVENTS = frozenset({"mcb_extract_beat_dual"})
 EXTRACT_EVENTS = EXTRACT_SCD_EVENTS | EXTRACT_BEAT_EVENTS
 
 # Soft glide ≈ SCD thetaLag 0.9s (capped per dwell).
@@ -130,10 +128,6 @@ def _linear_step(
             "mode": mode,
         },
     }
-
-
-def _is_4p(event_name: str) -> bool:
-    return event_name in ("mcb_extract_4p", "mcb_extract_4p_beat")
 
 
 def _pick_spoke(
@@ -372,14 +366,25 @@ def build_extract_motion_steps(
     l0_values: Optional[Sequence[float]] = None,
     event_start_ms: int = 0,
 ) -> List[Dict[str, Any]]:
-    """Bake hub–spoke overwrite steps (Apply/expand-time)."""
+    """Bake 3P and 4P hub–spoke overwrite steps (Apply/expand-time).
+
+    When seed is set, each geometry gets its own Random(seed) so 4P draws
+    do not follow 3P draws. A passed rng is used for 3P only when seed is absent.
+    """
     if event_name not in EXTRACT_EVENTS:
         return []
 
     duration_ms = int(round(float(final_params["duration_ms"])))
-    if rng is None:
-        seed = final_params.get("seed", None)
-        rng = random.Random(seed) if seed is not None else random.Random()
+    seed = final_params.get("seed", None)
+    if seed is not None:
+        rng3 = random.Random(seed)
+        rng4 = random.Random(seed)
+    elif rng is not None:
+        rng3 = rng
+        rng4 = random.Random()
+    else:
+        rng3 = random.Random()
+        rng4 = random.Random()
 
     segments = resolve_extract_segments(
         final_params,
@@ -389,9 +394,9 @@ def build_extract_motion_steps(
         event_start_ms=event_start_ms,
     )
 
-    if _is_4p(event_name):
-        return _build_4p_motion(duration_ms, rng, final_params, segments)
-    return _build_3p_motion(duration_ms, rng, final_params, segments)
+    steps = _build_3p_motion(duration_ms, rng3, final_params, segments)
+    steps.extend(_build_4p_motion(duration_ms, rng4, final_params, segments))
+    return steps
 
 
 def _build_3p_motion(

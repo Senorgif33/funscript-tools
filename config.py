@@ -2,22 +2,102 @@ import json
 import os
 import sys
 import copy
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Dict, Any, Union
+
+APP_CONFIG_DIRNAME = "RestimFunscriptProcessor"
+EVENT_DEFINITIONS_FILENAME = "config.event_definitions.yml"
+
+
+def get_user_config_dir() -> Path:
+    """User-writable config dir ($XDG_CONFIG_HOME or ~/.config)."""
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return Path(xdg) / APP_CONFIG_DIRNAME
+    return Path.home() / ".config" / APP_CONFIG_DIRNAME
+
+
+def ensure_user_config_dir() -> Path:
+    """Create and return the user config directory."""
+    config_dir = get_user_config_dir()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    return config_dir
+
+
+def get_bundled_resource_path(relative_path: str) -> Path:
+    """Path to a resource shipped with the app (MEIPASS or repo root)."""
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / relative_path
+    return Path(__file__).parent / relative_path
 
 
 def resolve_config_path(config_file: Union[str, Path] = "config.json") -> Path:
     """Resolve config.json path for source and frozen builds.
 
-    When frozen, always use the file next to the executable so settings load
-    regardless of the process working directory.
+    Frozen (AppImage/exe): writable XDG user config dir.
+    Source: project-relative path (cwd / given relative path).
     """
     path = Path(config_file)
     if path.is_absolute():
         return path
-    if getattr(sys, 'frozen', False):
-        return Path(sys.executable).parent / path.name
+    if getattr(sys, "frozen", False):
+        return get_user_config_dir() / path.name
     return path
+
+
+def resolve_event_definitions_path(*, for_write: bool = False) -> Path:
+    """Resolve event definitions YAML for read or write.
+
+    Frozen: prefer ~/.config/... copy; reads fall back to bundled file.
+    Source: repo-root YAML.
+    """
+    if getattr(sys, "frozen", False):
+        user_path = get_user_config_dir() / EVENT_DEFINITIONS_FILENAME
+        if for_write or user_path.exists():
+            return user_path
+        return get_bundled_resource_path(EVENT_DEFINITIONS_FILENAME)
+    return Path(__file__).parent / EVENT_DEFINITIONS_FILENAME
+
+
+def ensure_event_definitions_writable() -> Path:
+    """Writable event-definitions path; seed from bundled copy if missing."""
+    dest = resolve_event_definitions_path(for_write=True)
+    if not dest.exists():
+        ensure_user_config_dir()
+        src = get_bundled_resource_path(EVENT_DEFINITIONS_FILENAME)
+        if src.exists():
+            shutil.copy2(src, dest)
+        else:
+            dest.write_text("definitions: {}\n", encoding="utf-8")
+    return dest
+
+
+def get_active_config_dir() -> Path:
+    """Directory that holds the active user-facing config files."""
+    if getattr(sys, "frozen", False):
+        return ensure_user_config_dir()
+    return resolve_config_path().resolve().parent
+
+
+def open_user_config_folder() -> bool:
+    """Open the active config folder in the system file manager."""
+    folder = get_active_config_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    path = str(folder)
+    try:
+        if sys.platform.startswith("linux"):
+            subprocess.Popen(["xdg-open", path])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        elif sys.platform == "win32":
+            os.startfile(path)  # type: ignore[attr-defined]
+        else:
+            return False
+        return True
+    except Exception:
+        return False
 
 
 DEFAULT_CONFIG = {
@@ -234,6 +314,7 @@ class ConfigManager:
     def save_config(self) -> bool:
         """Save current configuration to file."""
         try:
+            self.config_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(self.config, f, indent=2)
             return True

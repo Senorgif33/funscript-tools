@@ -28,6 +28,34 @@ class EventProcessorError(Exception):
     pass
 
 
+EMPTY_EVENTS_TEMPLATE = """# Custom Events File
+# Add timed events to modify the generated funscript files.
+# All time values are in MILLISECONDS.
+# Event names must match definitions in config.event_definitions.yml
+#
+# Example event structure:
+# events:
+#   - time: 60000        # Event at 1 minute (60,000 ms)
+#     name: edge         # Event name from event_definitions.yml
+#     params:            # Optional parameter overrides
+#       duration_ms: 15000
+
+events:
+  # Add your custom events here
+"""
+
+
+def events_path_for_funscript(funscript_path: Path) -> Path:
+    """Sibling ``{stem}.events.yml`` for a funscript path."""
+    funscript_path = Path(funscript_path)
+    return funscript_path.parent / f"{funscript_path.stem}.events.yml"
+
+
+def write_empty_events_file(events_file_path: Path) -> None:
+    """Write the empty events template. Caller decides whether the path may exist."""
+    Path(events_file_path).write_text(EMPTY_EVENTS_TEMPLATE, encoding="utf-8")
+
+
 def _load_event_definitions(definitions_path: Path) -> tuple[Dict[str, Any], Dict[str, Dict[str, float]]]:
     """Loads event definitions and normalization config from a YAML file.
 

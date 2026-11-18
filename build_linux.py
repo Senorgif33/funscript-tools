@@ -121,6 +121,10 @@ def build_linux_binary():
         cmd.insert(-1, "--add-data")
         cmd.insert(-1, "config.event_definitions.yml:.")
 
+    if Path("assets/icon.png").exists():
+        cmd.insert(-1, "--icon")
+        cmd.insert(-1, "assets/icon.png")
+
     print("Running PyInstaller...")
     print(" ".join(cmd))
 
@@ -179,14 +183,32 @@ Categories=AudioVideo;Audio;
 Version=1.0
 """)
 
-    # Create a minimal placeholder icon (appimagetool requires the Icon= file to exist)
+    # App icon (appimagetool requires Icon= file to exist)
     icon_path = appdir / "RestimFunscriptProcessor.png"
-    _MINIMAL_PNG = bytes.fromhex(
-        "89504e470d0a1a0a0000000d494844520000000100000001080600000"
-        "01f15c4890000000a49444154789c6360000002000100ffff03000006"
-        "00057cd6690000000049454e44ae426082"
-    )
-    icon_path.write_bytes(_MINIMAL_PNG)
+    source_icon = Path("assets/icon.png")
+    if source_icon.exists():
+        shutil.copy2(source_icon, icon_path)
+        # Also install into hicolor for desktop environments
+        for size in (256, 128, 64, 48, 32):
+            hicolor = appdir / "usr" / "share" / "icons" / "hicolor" / f"{size}x{size}" / "apps"
+            hicolor.mkdir(parents=True, exist_ok=True)
+            try:
+                from PIL import Image
+                with Image.open(source_icon) as im:
+                    resized = im.convert("RGBA").resize((size, size), Image.Resampling.LANCZOS)
+                    resized.save(hicolor / "RestimFunscriptProcessor.png")
+            except Exception:
+                shutil.copy2(source_icon, hicolor / "RestimFunscriptProcessor.png")
+        print(f"Copied app icon from: {source_icon}")
+    else:
+        # Minimal placeholder if assets/icon.png is missing
+        _MINIMAL_PNG = bytes.fromhex(
+            "89504e470d0a1a0a0000000d494844520000000100000001080600000"
+            "01f15c4890000000a49444154789c6360000002000100ffff03000006"
+            "00057cd6690000000049454e44ae426082"
+        )
+        icon_path.write_bytes(_MINIMAL_PNG)
+        print("Warning: assets/icon.png missing; using placeholder icon")
 
     # Create AppRun script
     apprun = appdir / "AppRun"

@@ -278,9 +278,17 @@ Version information for Restim Funscript Processor
         4. Save as Default and Reset leave each event duration alone
         5. Beat extract min duration is 25s; SCD extract stays 60s
         6. apply_linear_change densifies short overwrite windows
+2.5.7 - MCB extract is one event per clock, covering 3P and 4P:
+        1. mcb_extract_dual bakes alpha/beta and e1-e4 on the SCD ~dur clock (min 60s)
+        2. mcb_extract_beat_dual bakes both on the L0 beat clock (min 25s)
+        3. Removed mcb_extract, mcb_extract_4p, mcb_extract_beat, and mcb_extract_4p_beat
+        4. corrupt_4p unchanged. No alias for the removed names
+        5. AppImage/frozen Linux writes config under XDG ~/.config/RestimFunscriptProcessor
+        6. Open Config Folder button opens the active config directory
+        7. App icon: Restim mark with red wrench (assets/icon.png / icon.ico)
 """
 
-__version__ = "2.5.6"
+__version__ = "2.5.7"
 __app_name__ = "Restim Funscript Processor"
 __description__ = "GUI application for processing funscript files for electrostimulation devices"
 __author__ = "Funscript Tools Project"

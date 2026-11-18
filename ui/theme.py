@@ -67,33 +67,38 @@ def _apply_fallback_theme(dark: bool) -> None:
 
 
 def _capture_native_size():
-    """Snapshot TkDefaultFont size before sv_ttk changes it."""
+    """Snapshot TkDefaultFont size before sv_ttk changes it.
+
+    On Linux, the desktop default is often 11pt (larger than Windows' ~9pt).
+    Cap to 9pt so the UI matches Windows visual density.
+    """
     global _native_body_size
     try:
+        import sys
         import tkinter.font as tkfont
-        _native_body_size = tkfont.nametofont('TkDefaultFont').actual()['size']
+        size = tkfont.nametofont('TkDefaultFont').actual()['size']
+        if sys.platform.startswith('linux'):
+            # Prefer positive points; Linux reports 11, Windows-like target is 9
+            size = 9 if abs(size) > 9 else size
+        _native_body_size = size
     except Exception:
         pass
 
 
 def _restore_sv_font_sizes():
-    """Bring sv_ttk's named fonts back down to the native body size."""
+    """Bring named fonts back down to the captured/capped body size."""
     try:
         import tkinter.font as tkfont
         size = _native_body_size
-        # Body font used by almost all widgets
-        tkfont.nametofont('SunValleyBodyFont').configure(size=size)
-        # Caption font used by LabelFrame labels and Treeview headings
-        tkfont.nametofont('SunValleyCaptionFont').configure(size=size)
-        # Also restore standard Tk named fonts in case sv_ttk touched them
-        for name in ('TkDefaultFont', 'TkTextFont', 'TkFixedFont',
+        for name in ('SunValleyBodyFont', 'SunValleyCaptionFont',
+                     'TkDefaultFont', 'TkTextFont', 'TkFixedFont',
                      'TkMenuFont', 'TkHeadingFont', 'TkSmallCaptionFont'):
             try:
                 tkfont.nametofont(name).configure(size=size)
             except Exception:
-                pass
+                pass  # SunValley names absent until sv_ttk loads
     except Exception:
-        pass  # SunValley fonts don't exist until sv_ttk first loads — safe to ignore
+        pass
 
 
 def is_dark() -> bool:
@@ -112,11 +117,11 @@ def apply(dark: bool) -> None:
         try:
             import sv_ttk
             sv_ttk.set_theme('dark' if dark else 'light')
-            _restore_sv_font_sizes()
         except Exception:
-            pass
+            _apply_fallback_theme(dark)
     else:
         _apply_fallback_theme(dark)
+    _restore_sv_font_sizes()
     for cb in list(_listeners):
         try:
             cb(dark)

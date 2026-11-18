@@ -29,8 +29,8 @@ class TestChapterExport(unittest.TestCase):
         self.assertEqual(ms_to_ofs_time(3661234), "01:01:01.234")
 
     def test_format_event_display_name(self):
-        self.assertEqual(format_event_display_name("mcb_extract_4p"), "MCB - Extract 4P")
-        self.assertEqual(format_event_display_name("mcb_extract_4p_beat"), "MCB - Extract 4P Beat")
+        self.assertEqual(format_event_display_name("mcb_extract_dual"), "MCB - Extract Dual")
+        self.assertEqual(format_event_display_name("mcb_extract_beat_dual"), "MCB - Extract Beat Dual")
         self.assertEqual(format_event_display_name("edge"), "General - Edge")
 
     def test_events_to_chapters_with_duration(self):
