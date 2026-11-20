@@ -9,13 +9,14 @@ import math
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, ttk
 
 import numpy as np
 import sys
 
 sys.path.append(str(Path(__file__).parent.parent))
 from funscript.funscript import Funscript
+from ui import native_filedialog as filedialog
 import ui.theme as _theme
 
 

@@ -100,6 +100,174 @@ definitions:
           ramp_in_ms: $ramp_up_ms
           mode: additive
 
+  # === CASCADE CUM ===
+  # Dual-box climax overlay (volume + volume-prostate). No L0 / αβ / e1-e4.
+  # Run-up: cascade alternate volume ↔ volume-prostate (slow waves; min_wave_ms).
+  # Climax (after orgasm cue, full hold_ms):
+  #   - volume / volume-prostate stay flat at volume_boost / volume_prostate_boost
+  #   - pulse_frequency / pulse_width sine: goodBoy in, high pulse_rate bed out
+  # Place orgasm timeline cue on video climax start. Stretch duration → longer hold.
+
+  cascade_cum:
+    timeline_cues:
+      - { offset_ms: 8000, label: "orgasm" }
+    default_params:
+      duration_ms: 28000
+      orgasm_offset_ms: 8000      # run-up length (cascade); must be >= 4 × min_wave_ms
+      min_wave_ms: 2000           # each cascade half-cycle at least this long
+      hold_ms: 20000              # derived: duration_ms - orgasm_offset_ms
+      wave_ms: 2000               # derived
+      volume_boost: 0.28          # cock flat boost after run-up (like cum)
+      volume_prostate_boost: 0.14 # anal flat boost (below cock)
+      presence_freq: 0.25         # Hz; slow goodBoy layer gate (pulse axes only)
+      pulse_rate: 105             # layer-out bed pulse_frequency
+      goodboy_pulse_rate: 27      # layer-in goodBoy pulse_frequency
+      goodboy_pulse_width: 50     # layer-in goodBoy pulse_width
+      pulse_width_trough: 35      # layer-out pulse_width
+      ramp_ms: 400
+      # derived cascade + mod helpers (set on Apply):
+      # wave_ms_2, wave_ms_3, vol_peak_*, pros_peak_*, *_mod_*
+    steps:
+      # --- RUN-UP CASCADE (4 waves) ---
+      # Wave 1: volume up, prostate low
+      - operation: apply_linear_change
+        axis: volume
+        params:
+          start_value: 0.0
+          end_value: $vol_peak_1
+          duration_ms: $wave_ms
+          ramp_in_ms: 0
+          ramp_out_ms: 0
+          mode: additive
+      - operation: apply_linear_change
+        axis: volume-prostate
+        params:
+          start_value: 0.0
+          end_value: 0.0
+          duration_ms: $wave_ms
+          ramp_in_ms: 0
+          ramp_out_ms: 0
+          mode: additive
+
+      # Wave 2: prostate up (stronger), volume dips
+      - operation: apply_linear_change
+        axis: volume
+        start_offset: $wave_ms
+        params:
+          start_value: $vol_peak_1
+          end_value: $vol_dip_1
+          duration_ms: $wave_ms
+          ramp_in_ms: 0
+          ramp_out_ms: 0
+          mode: additive
+      - operation: apply_linear_change
+        axis: volume-prostate
+        start_offset: $wave_ms
+        params:
+          start_value: 0.0
+          end_value: $pros_peak_1
+          duration_ms: $wave_ms
+          ramp_in_ms: 0
+          ramp_out_ms: 0
+          mode: additive
+
+      # Wave 3: volume up to full boost, prostate dips
+      - operation: apply_linear_change
+        axis: volume
+        start_offset: $wave_ms_2
+        params:
+          start_value: $vol_dip_1
+          end_value: $vol_peak_2
+          duration_ms: $wave_ms
+          ramp_in_ms: 0
+          ramp_out_ms: 0
+          mode: additive
+      - operation: apply_linear_change
+        axis: volume-prostate
+        start_offset: $wave_ms_2
+        params:
+          start_value: $pros_peak_1
+          end_value: $pros_dip_1
+          duration_ms: $wave_ms
+          ramp_in_ms: 0
+          ramp_out_ms: 0
+          mode: additive
+
+      # Wave 4: prostate up to full boost, volume holds at boost
+      - operation: apply_linear_change
+        axis: volume
+        start_offset: $wave_ms_3
+        params:
+          start_value: $vol_peak_2
+          end_value: $volume_boost
+          duration_ms: $wave_ms
+          ramp_in_ms: 0
+          ramp_out_ms: 0
+          mode: additive
+      - operation: apply_linear_change
+        axis: volume-prostate
+        start_offset: $wave_ms_3
+        params:
+          start_value: $pros_dip_1
+          end_value: $pros_peak_2
+          duration_ms: $wave_ms
+          ramp_in_ms: 0
+          ramp_out_ms: 0
+          mode: additive
+
+      # --- CLIMAX: flat volume boost + goodBoy layer in/out on pulse axes ---
+      - operation: apply_linear_change
+        axis: volume
+        start_offset: $orgasm_offset_ms
+        params:
+          start_value: $volume_boost
+          end_value: $volume_boost
+          duration_ms: $hold_ms
+          ramp_in_ms: 0
+          ramp_out_ms: $ramp_ms
+          mode: additive
+
+      - operation: apply_linear_change
+        axis: volume-prostate
+        start_offset: $orgasm_offset_ms
+        params:
+          start_value: $volume_prostate_boost
+          end_value: $volume_prostate_boost
+          duration_ms: $hold_ms
+          ramp_in_ms: 0
+          ramp_out_ms: $ramp_ms
+          mode: additive
+
+      # phase 270: cue starts with goodBoy pulse_frequency in; high bed when layered out
+      - operation: apply_modulation
+        axis: pulse_frequency
+        start_offset: $orgasm_offset_ms
+        params:
+          waveform: sin
+          frequency: $presence_freq
+          amplitude: $pulse_mod_amplitude
+          max_level_offset: $pulse_mod_center
+          phase: 270
+          duration_ms: $hold_ms
+          ramp_in_ms: $ramp_ms
+          ramp_out_ms: $ramp_ms
+          mode: overwrite
+
+      # phase 90: goodBoy pulse_width when layered in
+      - operation: apply_modulation
+        axis: pulse_width
+        start_offset: $orgasm_offset_ms
+        params:
+          waveform: sin
+          frequency: $presence_freq
+          amplitude: $width_mod_amplitude
+          max_level_offset: $width_mod_center
+          phase: 90
+          duration_ms: $hold_ms
+          ramp_in_ms: $ramp_ms
+          ramp_out_ms: $ramp_ms
+          mode: overwrite
+
   stay:
     default_params:
       duration_ms: 15000

@@ -1,7 +1,8 @@
 import copy
 import json
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog
+from ui import native_filedialog as filedialog
 from pathlib import Path
 from typing import Dict, Any
 

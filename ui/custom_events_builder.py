@@ -7,7 +7,7 @@ custom event timelines without requiring manual YAML editing.
 
 import bisect
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, messagebox
 import json
 import logging
 import threading
@@ -20,14 +20,69 @@ from typing import Dict, List, Any, Optional
 log = logging.getLogger(__name__)
 
 import sys as _sys
-_VLC_AVAILABLE = False
-if _sys.platform == 'win32':
+
+# Video backend: libmpv via python-mpv only (Linux + Windows).
+_VIDEO_BACKEND = None
+_VIDEO_BACKEND_ERROR = ''
+try:
+    import mpv as _mpv_test
+    del _mpv_test
+    if _sys.platform.startswith('linux'):
+        import ctypes.util as _ctypes_util
+        if not _ctypes_util.find_library('mpv'):
+            raise OSError('libmpv not found (install libmpv2 / mpv)')
+    # Windows: import loads libmpv-2.dll / mpv-2.dll from PATH / exe dir.
+    _VIDEO_BACKEND = 'mpv'
+except Exception as _e:
+    _VIDEO_BACKEND_ERROR = f'python-mpv/libmpv unavailable: {_e}'
+
+_VIDEO_AVAILABLE = _VIDEO_BACKEND is not None
+# Back-compat alias used by older call sites / mental model
+_VLC_AVAILABLE = _VIDEO_AVAILABLE
+
+# Keep X11 error handler alive (ctypes callback otherwise gets GC'd).
+_X11_ERROR_HANDLER_REF = None
+
+
+def _install_x11_badwindow_guard():
+    """Ignore non-fatal X BadWindow during mpv/Tk embed teardown."""
+    global _X11_ERROR_HANDLER_REF
+    if _X11_ERROR_HANDLER_REF is not None or not _sys.platform.startswith('linux'):
+        return
     try:
-        import vlc as _vlc_test
-        del _vlc_test
-        _VLC_AVAILABLE = True
-    except (ImportError, OSError):
-        pass
+        import ctypes
+        from ctypes import CFUNCTYPE, c_int, c_void_p
+
+        libx = ctypes.CDLL('libX11.so.6')
+        # XErrorEvent: type, display, resourceid, serial, error_code, request_code, minor_code
+        class _XErrorEvent(ctypes.Structure):
+            _fields_ = [
+                ('type', c_int),
+                ('display', c_void_p),
+                ('resourceid', ctypes.c_ulong),
+                ('serial', ctypes.c_ulong),
+                ('error_code', ctypes.c_ubyte),
+                ('request_code', ctypes.c_ubyte),
+                ('minor_code', ctypes.c_ubyte),
+            ]
+
+        handler_t = CFUNCTYPE(c_int, c_void_p, ctypes.POINTER(_XErrorEvent))
+        # BadWindow=3, BadDrawable=9 — common during mpv/Tk window teardown.
+        @handler_t
+        def _handler(_display, event):
+            try:
+                code = int(event.contents.error_code)
+                if code in (3, 9):
+                    return 0
+            except Exception:
+                return 0
+            # Soft-ignore others too: default X handler aborts the process.
+            return 0
+
+        _X11_ERROR_HANDLER_REF = _handler
+        libx.XSetErrorHandler(_handler)
+    except Exception:
+        _X11_ERROR_HANDLER_REF = False
 
 # Add parent directory to path to allow sibling imports
 import sys
@@ -50,6 +105,7 @@ from config import (
     ensure_event_definitions_writable,
     resolve_event_definitions_path,
 )
+from ui import native_filedialog as filedialog
 import ui.theme as _theme
 
 
@@ -100,6 +156,61 @@ def apply_params_keeping_time(
     return count
 
 
+def event_type_display_name(event_name: str) -> str:
+    """Human-readable event type label (no favorite marker)."""
+    return (
+        event_name.replace('mcb_', '').replace('clutch_', '').replace('_', ' ').title()
+    )
+
+
+def merge_params_for_type_change(
+    old_params: Dict[str, Any],
+    new_default_params: Dict[str, Any],
+    keep_compatible: bool,
+) -> Dict[str, Any]:
+    """Build params for a type change; optionally keep overlapping keys."""
+    new_params = dict(new_default_params)
+    if keep_compatible:
+        for k, v in (old_params or {}).items():
+            if k in new_params:
+                new_params[k] = v
+    return new_params
+
+
+def replace_event_type(
+    events: List[Dict[str, Any]],
+    new_name: str,
+    new_default_params: Dict[str, Any],
+    keep_compatible: bool,
+    *,
+    indices: Optional[List[int]] = None,
+    old_name: Optional[str] = None,
+) -> int:
+    """Rename events to *new_name* and rebuild params. Returns count changed.
+
+    Pass *indices* to replace specific events, or *old_name* to replace every
+    matching type. Does not push undo history — caller owns that.
+    """
+    if indices is not None:
+        target = set(indices)
+    elif old_name is not None:
+        target = {i for i, ev in enumerate(events) if ev.get('name') == old_name}
+    else:
+        return 0
+
+    count = 0
+    for i in sorted(target):
+        if not (0 <= i < len(events)):
+            continue
+        ev = events[i]
+        ev['name'] = new_name
+        ev['params'] = merge_params_for_type_change(
+            ev.get('params') or {}, new_default_params, keep_compatible
+        )
+        count += 1
+    return count
+
+
 def _log_custom_events(msg: str) -> None:
     """Append a line to custom_events.log next to the exe (or cwd when running from source)."""
     import datetime
@@ -119,12 +230,15 @@ class EventLibraryPanel(ttk.Frame):
 
     def __init__(self, parent, event_definitions: Dict[str, Any], groups: List[Dict[str, str]],
                  on_select_callback, favorites: Optional[List[str]] = None,
-                 on_favorites_changed=None):
+                 on_favorites_changed=None, mode: str = 'browser',
+                 on_confirm_callback=None):
         super().__init__(parent)
         self.event_definitions = event_definitions
         self.groups = groups
         self.on_select_callback = on_select_callback
         self.on_favorites_changed = on_favorites_changed
+        self.on_confirm_callback = on_confirm_callback
+        self.mode = mode if mode in ('browser', 'picker') else 'browser'
         # Drop stale favorites that no longer exist in definitions
         self.favorites: List[str] = [n for n in (favorites or []) if n in event_definitions]
         self._context_menu_event: Optional[str] = None
@@ -136,7 +250,8 @@ class EventLibraryPanel(ttk.Frame):
     def setup_ui(self):
         """Create the UI components"""
         # Title
-        title_label = ttk.Label(self, text="Event Library", font=('TkDefaultFont', 10, 'bold'))
+        title = "Select New Event Type" if self.mode == 'picker' else "Event Library"
+        title_label = ttk.Label(self, text=title, font=('TkDefaultFont', 10, 'bold'))
         title_label.pack(pady=(0, 5))
 
         # Search box
@@ -179,11 +294,12 @@ class EventLibraryPanel(ttk.Frame):
 
         self.add_to_timeline_btn = ttk.Button(btn_frame, text="Add to Timeline",
                                               command=self.on_add_to_timeline, state='disabled')
-        self.add_to_timeline_btn.pack(fill=tk.X)
+        if self.mode != 'picker':
+            self.add_to_timeline_btn.pack(fill=tk.X)
 
         self.favorite_btn = ttk.Button(btn_frame, text="Favorite",
                                        command=self._on_favorite_button, state='disabled')
-        self.favorite_btn.pack(fill=tk.X, pady=(4, 0))
+        self.favorite_btn.pack(fill=tk.X, pady=(4, 0) if self.mode != 'picker' else 0)
 
     def _valid_favorites(self) -> List[str]:
         """Return favorited event keys that still exist in definitions."""
@@ -428,6 +544,11 @@ class EventLibraryPanel(ttk.Frame):
 
     def on_event_double_click(self, event):
         """Handle double-click on event"""
+        if self.mode == 'picker':
+            name = self.get_selected_event()
+            if name and self.on_confirm_callback:
+                self.on_confirm_callback(name)
+            return
         self.on_add_to_timeline()
 
     def on_add_to_timeline(self):
@@ -472,7 +593,14 @@ class ParameterPanel(ttk.Frame):
         self.setup_ui()
         _theme.register(self._on_theme_change)
         self._apply_text_theme(_theme.is_dark())
-        self.bind('<Destroy>', lambda e: _theme.unregister(self._on_theme_change) if e.widget is self else None)
+
+        def _on_destroy(e):
+            if e.widget is not self:
+                return
+            _theme.unregister(self._on_theme_change)
+            self._deactivate_param_mousewheel(force=True)
+
+        self.bind('<Destroy>', _on_destroy)
 
     def _apply_text_theme(self, dark: bool):
         bg = '#1e1e2e' if dark else '#f5f5f5'
@@ -494,10 +622,20 @@ class ParameterPanel(ttk.Frame):
         self.editing_label = ttk.Label(self, text="", foreground='blue', font=('TkDefaultFont', 9))
         self.editing_label.pack(pady=(0, 5))
 
-        # Scrollable frame for parameters
-        canvas_frame = ttk.Frame(self)
-        canvas_frame.pack(fill=tk.BOTH, expand=True)
+        # Buttons stay pinned under the paned area
+        btn_frame = ttk.Frame(self)
+        btn_frame.pack(fill=tk.X, pady=5, side=tk.BOTTOM)
 
+        ttk.Button(btn_frame, text="Reset to Defaults", command=self.reset_to_defaults).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Apply Parameters", command=self.apply_parameters).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Apply to All", command=self._on_apply_all).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Save as Default", command=self._on_save_default).pack(side=tk.LEFT, padx=2)
+
+        # Resizable split: parameters (top) / Event Steps Preview (bottom)
+        self._params_paned = ttk.PanedWindow(self, orient=tk.VERTICAL)
+        self._params_paned.pack(fill=tk.BOTH, expand=True)
+
+        canvas_frame = ttk.Frame(self._params_paned)
         self.canvas = tk.Canvas(canvas_frame, highlightthickness=0)
         scrollbar = ttk.Scrollbar(canvas_frame, orient='vertical', command=self.canvas.yview)
 
@@ -511,29 +649,85 @@ class ParameterPanel(ttk.Frame):
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Buttons frame — packed before preview so it's always visible
-        btn_frame = ttk.Frame(self)
-        btn_frame.pack(fill=tk.X, pady=5, side=tk.BOTTOM)
+        # Wheel scroll: bind_all while pointer is over the params area.
+        # Needed on Windows (wheel goes to focused widget, not hover target).
+        self._param_wheel_bound = False
+        canvas_frame.bind('<Enter>', self._activate_param_mousewheel)
+        canvas_frame.bind('<Leave>', self._deactivate_param_mousewheel)
 
-        ttk.Button(btn_frame, text="Reset to Defaults", command=self.reset_to_defaults).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="Apply Parameters", command=self.apply_parameters).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="Apply to All", command=self._on_apply_all).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="Save as Default", command=self._on_save_default).pack(side=tk.LEFT, padx=2)
+        self._params_paned.add(canvas_frame, weight=3)
 
-        # Event steps preview section
-        preview_frame = ttk.LabelFrame(self, text="Event Steps Preview", padding=5)
-        preview_frame.pack(fill=tk.BOTH, expand=False, pady=(5, 0), side=tk.BOTTOM)
-
-        self.steps_text = tk.Text(preview_frame, height=8, wrap=tk.WORD,
-                                  font=('Courier', 9),
-                                  relief=tk.FLAT, state=tk.DISABLED)
-        steps_scrollbar = ttk.Scrollbar(preview_frame, orient='vertical', command=self.steps_text.yview)
+        preview_frame = ttk.LabelFrame(
+            self._params_paned, text="Event Steps Preview", padding=5
+        )
+        self.steps_text = tk.Text(
+            preview_frame, height=6, wrap=tk.WORD,
+            font=('Courier', 9),
+            relief=tk.FLAT, state=tk.DISABLED,
+        )
+        steps_scrollbar = ttk.Scrollbar(
+            preview_frame, orient='vertical', command=self.steps_text.yview
+        )
         self.steps_text.configure(yscrollcommand=steps_scrollbar.set)
-
         self.steps_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         steps_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
+        self._params_paned.add(preview_frame, weight=1)
+
         self.show_placeholder()
+
+    def _pointer_over_params(self) -> bool:
+        """True when the pointer is over the scrollable parameter area."""
+        try:
+            x, y = self.winfo_pointerxy()
+            widget = self.winfo_containing(x, y)
+        except tk.TclError:
+            return False
+        while widget is not None:
+            if widget in (self.canvas, self.params_frame):
+                return True
+            widget = getattr(widget, 'master', None)
+        return False
+
+    def _on_param_mousewheel(self, event):
+        """Scroll the parameters canvas from mouse wheel / trackpad."""
+        if not self._pointer_over_params():
+            return  # let timeline / other widgets handle the event
+        if getattr(event, 'delta', 0):
+            # Windows / macOS: delta is typically ±120 per notch
+            steps = int(-event.delta / 120) if abs(event.delta) >= 120 else (
+                -1 if event.delta > 0 else 1
+            )
+            if steps == 0:
+                steps = -1 if event.delta > 0 else 1
+            self.canvas.yview_scroll(steps, 'units')
+        elif getattr(event, 'num', None) == 4:
+            self.canvas.yview_scroll(-1, 'units')
+        elif getattr(event, 'num', None) == 5:
+            self.canvas.yview_scroll(1, 'units')
+        return 'break'
+
+    def _activate_param_mousewheel(self, _event=None):
+        if self._param_wheel_bound:
+            return
+        self.canvas.bind_all('<MouseWheel>', self._on_param_mousewheel)
+        self.canvas.bind_all('<Button-4>', self._on_param_mousewheel)
+        self.canvas.bind_all('<Button-5>', self._on_param_mousewheel)
+        self._param_wheel_bound = True
+
+    def _deactivate_param_mousewheel(self, _event=None, force: bool = False):
+        if not getattr(self, '_param_wheel_bound', False):
+            return
+        # Only unbind if pointer left the params area (not moving canvas→child).
+        if not force and self._pointer_over_params():
+            return
+        try:
+            self.canvas.unbind_all('<MouseWheel>')
+            self.canvas.unbind_all('<Button-4>')
+            self.canvas.unbind_all('<Button-5>')
+        except tk.TclError:
+            pass
+        self._param_wheel_bound = False
 
     def show_placeholder(self):
         """Show placeholder when no event is selected"""
@@ -589,6 +783,7 @@ class ParameterPanel(ttk.Frame):
 
         # Update steps preview
         self.update_steps_preview()
+        self.canvas.yview_moveto(0)
 
     def create_time_control(self):
         """Create the time input control with quick adjustment buttons"""
@@ -2323,34 +2518,32 @@ _VIDEO_POLL_MS = 33  # ~30 fps polling interval for video playback
 
 class VideoPanel(ttk.Frame):
     """
-    Embeds a video player into a Tkinter Frame using python-vlc.
-    VLC renders directly to the canvas HWND — no frame transfer needed.
-    Seeking and play/pause are near-instant.
+    Embeds a video player into a Tkinter Frame.
+
+    libmpv via python-mpv (wid= HWND on Windows, X11 window on Linux).
+    Seeking and play/pause stay in-process — no frame transfer.
     """
 
     def __init__(self, parent, **kwargs):
         super().__init__(parent, **kwargs)
-        # VLC objects (created once on first load)
-        self._vlc_inst = None     # vlc.Instance
-        self._vlc_mp = None       # vlc.MediaPlayer
+        self._backend = _VIDEO_BACKEND
+        self._mpv = None
         # Playback state
         self._poll_id = None
         self._playing = False
         self._fps: float = 30.0
         self._duration_s: float = 0.0
         self._video_path: Optional[str] = None
-        self._seek_updating = False   # suppress seek callback while programmatically moving bar
-        self._on_playback_tick = None   # Callable[[float], None] set by dialog
-        self._on_duration_known = None  # Callable[[float], None] fired with duration_ms
+        self._seek_updating = False
+        self._on_playback_tick = None
+        self._on_duration_known = None
         self._meta_cached = False
         self._label_tick: int = 0
-        self._time_show_remaining = False   # toggled by clicking the time label
-        self._on_video_size_known = None  # Callable[[int, int], None] fired with (width, height)
+        self._time_show_remaining = False
+        self._on_video_size_known = None
         self._video_w: int = 0
         self._video_h: int = 0
 
-        # Pack order matters: BOTTOM items stack upward, canvas fills remaining space.
-        # Controls bar (bottom-most)
         ctrl = ttk.Frame(self)
         ctrl.pack(fill=tk.X, side=tk.BOTTOM)
 
@@ -2370,7 +2563,6 @@ class VideoPanel(ttk.Frame):
         self._status_label = ttk.Label(ctrl, text='No video loaded', foreground='gray')
         self._status_label.pack(side=tk.LEFT, padx=8)
 
-        # Seek bar (above controls)
         seek_frame = ttk.Frame(self)
         seek_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=4, pady=(0, 1))
         self._seek_var = tk.DoubleVar(value=0.0)
@@ -2380,17 +2572,14 @@ class VideoPanel(ttk.Frame):
         self._seek_bar.bind('<Button-1>', self._on_seek_click)
         self._seek_bar.bind('<B1-Motion>', self._on_seek_click)
 
-        # Video canvas (fills remaining space above seek bar)
         self._canvas = tk.Canvas(self, bg='black')
         self._canvas.pack(fill=tk.BOTH, expand=True)
         self._canvas.bind('<Configure>', self._on_canvas_resize)
 
-        # Keyboard callbacks — set by dialog after construction
-        self.on_arrow: Optional[callable] = None        # fn(frames: int)
-        self.on_seek_ms: Optional[callable] = None      # fn(delta_ms: float)
-        self.on_play_pause: Optional[callable] = None   # fn()
+        self.on_arrow: Optional[callable] = None
+        self.on_seek_ms: Optional[callable] = None
+        self.on_play_pause: Optional[callable] = None
 
-        # Bind keys to canvas and toplevel (whichever has focus)
         for widget in (self._canvas, self):
             widget.bind('<space>',               lambda e: self.on_play_pause() if self.on_play_pause else None)
             widget.bind('<Left>',                lambda e: self.on_arrow(-1)    if self.on_arrow    else None)
@@ -2401,13 +2590,25 @@ class VideoPanel(ttk.Frame):
             widget.bind('<Shift-Control-Right>', lambda e: self.on_seek_ms(30_000)  if self.on_seek_ms else None)
         self._canvas.bind('<Button-1>', lambda e: self._canvas.focus_set())
 
+    def _player_ready(self) -> bool:
+        return self._backend == 'mpv' and self._mpv is not None
+
     def reattach_hwnd(self):
-        """Re-bind VLC output to the canvas HWND (after tab switch / resize)."""
-        if self._vlc_mp is None:
+        """Re-bind player output to the canvas window (tab switch / resize)."""
+        self._reattach_window()
+
+    def _reattach_window(self):
+        if not self._player_ready():
             return
         try:
             self.update_idletasks()
-            self._vlc_mp.set_hwnd(self._canvas.winfo_id())
+            wid = int(self._canvas.winfo_id())
+            if self._mpv is not None:
+                # mpv usually tracks parent size; re-assert wid after tab switches.
+                try:
+                    self._mpv.wid = str(wid)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -2418,163 +2619,234 @@ class VideoPanel(ttk.Frame):
     def load(self, path: str) -> bool:
         """Load a video file. Returns True on success."""
         self._video_path = path
-        try:
-            import vlc as _vlc
-        except (ImportError, OSError):
-            self._status_label.config(text='VLC not available on this platform')
-            return False
-        # Create VLC instance once.
-        # --avcodec-hw=none  : disable FFmpeg hardware video decoding
-        # --vout=wingdi       : force Windows GDI video output (avoids D3D9/D3D11
-        #                       renderer crashes for certain encoded files)
-        if self._vlc_inst is None:
-            self._vlc_inst = _vlc.Instance(
-                '--no-xlib --quiet --no-video-title-show '
-                '--avcodec-hw=none --vout=wingdi')
-            self._vlc_mp = self._vlc_inst.media_player_new()
-            em = self._vlc_mp.event_manager()
-            em.event_attach(_vlc.EventType.MediaPlayerEndReached,
-                            lambda _e: self.after(0, self._on_eof))
-        # Reset state
+        if self._backend == 'mpv':
+            return self._load_mpv(path)
+        self._status_label.config(text='No video backend available')
+        return False
+
+    def _reset_load_ui(self, path: str):
+        import os
         self._playing = False
         self._play_btn.config(text='\u25b6 Play')
         self._meta_cached = False
         self._duration_s = 0.0
-        # Reset seek bar to 0 before loading new media.  If the old position
-        # exceeds the new video's duration, ttk.Scale will clamp the value when
-        # to= is updated in _read_metadata and fire _on_seek_bar with the max
-        # value \u2014 seeking VLC straight to EOF and leaving a black screen.
         self._seek_updating = True
         self._seek_var.set(0.0)
-        self._seek_bar.config(to=1.0)   # placeholder until real duration is read
+        self._seek_bar.config(to=1.0)
         self._seek_updating = False
-        import os
-        self._status_label.config(text=f'Loading {os.path.basename(path)}\u2026')
-        media = self._vlc_inst.media_new(path)
-        # Disable hardware video decoding per-media as a belt-and-suspenders
-        # measure in case the Instance was already created without the flag.
-        media.add_option(':avcodec-hw=none')
-        self._vlc_mp.set_media(media)
-        # Ensure the canvas HWND is realized before passing to VLC.
-        # The video window may be withdrawn; update_idletasks forces HWND creation.
+        self._status_label.config(text=f'Loading {os.path.basename(path)}\u2026', foreground='gray')
+
+
+    def _load_mpv(self, path: str) -> bool:
+        try:
+            import mpv as _mpv
+        except (ImportError, OSError) as e:
+            self._status_label.config(text=f'mpv not available: {e}')
+            return False
+        self._reset_load_ui(path)
         self._canvas.winfo_toplevel().update_idletasks()
-        self._vlc_mp.set_hwnd(self._canvas.winfo_id())
-        self._vlc_mp.audio_set_volume(int(self._vol_var.get()))
-        # NOTE: parse_with_options is intentionally omitted — it triggers an
-        # async VLC thread that races with play() and can crash for large files.
-        # Duration/fps are obtained via the poll loop once play() starts.
-        self._vlc_mp.play()
+        wid = str(int(self._canvas.winfo_id()))
+        try:
+            if self._mpv is None:
+                _install_x11_badwindow_guard()
+                # Linux: vo=x11 is reliable with Tk X11 windows.
+                # Windows: default vo + wid=HWND (do not force x11).
+                mpv_kwargs = dict(
+                    wid=wid,
+                    input_default_bindings=False,
+                    input_vo_keyboard=False,
+                    osc=False,
+                    keep_open='yes',
+                    idle='yes',
+                    hr_seek='yes',  # precise scrubbing while paused
+                )
+                if _sys.platform.startswith('linux'):
+                    mpv_kwargs['vo'] = 'x11'
+                self._mpv = _mpv.MPV(**mpv_kwargs)
+            else:
+                try:
+                    self._mpv.wid = wid
+                except Exception:
+                    pass
+            self._mpv.volume = int(self._vol_var.get())
+            self._mpv.play(path)
+            # Start paused after first frame (mirrors VLC path).
+            self._mpv.pause = False
+        except Exception as e:
+            log.exception('mpv load failed')
+            self._status_label.config(text=f'mpv load failed: {e}', foreground='red')
+            return False
         self.after(300, self._pause_after_first_frame)
         self._start_poll()
         return True
 
     def seek(self, ms: float):
         """Seek to position in milliseconds."""
-        if self._vlc_mp is None:
+        if not self._player_ready():
             return
         clamped = max(0, int(ms))
         if self._duration_s > 0:
             clamped = min(clamped, int(self._duration_s * 1000))
-        self._vlc_mp.set_time(clamped)
+        self._set_time_ms(clamped)
         self._update_time_label_from_ms(float(clamped))
         if self._on_playback_tick is not None:
             self._on_playback_tick(float(clamped))
 
     def toggle_play(self):
         """Toggle between play and pause."""
-        if self._vlc_mp is None:
+        if not self._player_ready():
             return
         if self._playing:
             self._playing = False
             self._play_btn.config(text='\u25b6 Play')
-            self._vlc_mp.pause()
+            self._set_paused(True)
         else:
             self._playing = True
             self._play_btn.config(text='\u23f8 Pause')
-            self._vlc_mp.play()
+            self._set_paused(False)
 
     def stop(self):
-        """Stop playback and release VLC media."""
+        """Stop playback (keep player instance for reuse)."""
         self._stop_poll()
         self._playing = False
         if hasattr(self, '_play_btn'):
             self._play_btn.config(text='\u25b6 Play')
-        if self._vlc_mp is not None:
+        try:
+            if self._mpv is not None:
+                self._mpv.command('stop')
+                self._mpv.pause = True
+        except Exception:
+            pass
+
+    def shutdown(self):
+        """Fully release the player while the canvas window still exists.
+
+        Must run before Tk destroys the canvas — otherwise libmpv can
+        X_QueryTree a dead window and abort the whole process (BadWindow).
+        """
+        self._stop_poll()
+        self._playing = False
+        if self._mpv is not None:
+            player = self._mpv
+            self._mpv = None
             try:
-                self._vlc_mp.stop()
+                player.pause = True
             except Exception:
                 pass
+            try:
+                player.command('stop')
+            except Exception:
+                pass
+            # Detach from the X window before quit/Tk teardown.
+            try:
+                player.wid = '0'
+            except Exception:
+                try:
+                    player['wid'] = '0'
+                except Exception:
+                    pass
+            try:
+                # quit() waits for shutdown; prefer over terminate() (python-mpv #114).
+                player.quit(0)
+            except Exception:
+                try:
+                    player.terminate()
+                except Exception:
+                    pass
 
     def destroy(self):
-        """Ensure VLC resources are released before widget destruction."""
-        self.stop()
-        if self._vlc_mp is not None:
-            try:
-                self._vlc_mp.release()
-            except Exception:
-                pass
-            self._vlc_mp = None
-        if self._vlc_inst is not None:
-            try:
-                self._vlc_inst.release()
-            except Exception:
-                pass
-            self._vlc_inst = None
+        """Release player resources before widget destruction."""
+        self.shutdown()
         super().destroy()
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Backend helpers
     # ------------------------------------------------------------------
 
+    def _set_paused(self, paused: bool):
+        try:
+            if self._mpv is not None:
+                self._mpv.pause = bool(paused)
+        except Exception:
+            pass
+
+    def _set_time_ms(self, ms: int):
+        try:
+            if self._mpv is not None:
+                # time_pos is the reliable absolute scrub API for libmpv.
+                self._mpv.time_pos = ms / 1000.0
+        except Exception:
+            pass
+
+    def _get_time_ms(self) -> float:
+        try:
+            if self._mpv is not None:
+                t = self._mpv.time_pos
+                if t is None:
+                    return -1.0
+                return float(t) * 1000.0
+        except Exception:
+            pass
+        return -1.0
+
     def _pause_after_first_frame(self):
-        """Called 300 ms after load() — pause VLC and read metadata."""
-        if self._vlc_mp is None:
+        """Called 300 ms after load() — pause and read metadata."""
+        if not self._player_ready():
             return
         if not self._playing:
-            self._vlc_mp.pause()
+            self._set_paused(True)
         if not self._meta_cached:
             self._read_metadata()
 
     def _read_metadata(self):
-        """Read duration and fps from VLC after media is parsed."""
-        if self._vlc_mp is None:
+        """Read duration and fps after media is parsed."""
+        if not self._player_ready() or self._meta_cached:
             return
         try:
-            dur_ms = self._vlc_mp.get_length()
-            if dur_ms > 0 and not self._meta_cached:
-                self._duration_s = dur_ms / 1000.0
-                self._seek_bar.config(to=float(self._duration_s))
-                self._meta_cached = True
-                # Use get_fps() rather than tracks_get() — the latter returns
-                # raw ctypes pointers whose .contents dereference can segfault
-                # if VLC frees the track structs concurrently.
-                fps = self._vlc_mp.get_fps()
-                if fps > 0:
-                    self._fps = fps
-                if self._on_duration_known is not None:
-                    self._on_duration_known(float(dur_ms))
-                # Update status to just the filename
-                import os
+            dur_s = 0.0
+            fps = 0.0
+            name = None
+            d = self._mpv.duration
+            if d:
+                dur_s = float(d)
+            for prop in ('container_fps', 'estimated_vf_fps'):
                 try:
-                    path = self._vlc_mp.get_media().get_mrl()
-                    # mrl may be file:///... — extract base name
-                    from urllib.parse import unquote
-                    name = os.path.basename(unquote(path.replace('file:///', '').replace('file://', '')))
-                    self._status_label.config(text=name)
+                    v = getattr(self._mpv, prop, None)
+                    if v:
+                        fps = float(v)
+                        break
                 except Exception:
-                    self._status_label.config(text='Loaded')
-                self._emit_video_size(attempt=0)
+                    pass
+            try:
+                import os
+                name = os.path.basename(self._video_path or '') or None
+            except Exception:
+                name = None
+
+            if dur_s <= 0:
+                return
+            self._duration_s = dur_s
+            self._seek_bar.config(to=float(self._duration_s))
+            self._meta_cached = True
+            if fps > 0:
+                self._fps = fps
+            if self._on_duration_known is not None:
+                self._on_duration_known(float(dur_s) * 1000.0)
+            self._status_label.config(text=name or 'Loaded', foreground='gray')
+            self._emit_video_size(attempt=0)
         except Exception:
             pass
 
     def _emit_video_size(self, attempt: int = 0):
-        """Read pixel size from VLC and notify the dialog (retry if not ready)."""
-        if self._vlc_mp is None:
+        """Read pixel size and notify the dialog (retry if not ready)."""
+        if not self._player_ready():
             return
+        w = h = 0
         try:
-            size = self._vlc_mp.video_get_size(0)
-            w = int(size[0]) if size else 0
-            h = int(size[1]) if size else 0
+            ww = self._mpv.width
+            hh = self._mpv.height
+            w = int(ww) if ww else 0
+            h = int(hh) if hh else 0
         except Exception:
             w, h = 0, 0
         if w > 0 and h > 0:
@@ -2586,25 +2858,23 @@ class VideoPanel(ttk.Frame):
             self.after(200, lambda: self._emit_video_size(attempt + 1))
 
     def _on_eof(self):
-        """VLC end-of-file — called on Tkinter thread via after(0)."""
+        """End-of-file — Tk thread."""
         self._playing = False
         if hasattr(self, '_play_btn'):
             self._play_btn.config(text='\u25b6 Play')
 
     def _on_vol_change(self, *_):
-        if self._vlc_mp is not None:
-            try:
-                self._vlc_mp.audio_set_volume(int(self._vol_var.get()))
-            except Exception:
-                pass
+        if not self._player_ready():
+            return
+        try:
+            if self._mpv is not None:
+                self._mpv.volume = int(self._vol_var.get())
+        except Exception:
+            pass
 
     def _on_canvas_resize(self, event):
-        """Canvas resized — re-attach VLC HWND so it fills the new size."""
-        if self._vlc_mp is not None:
-            try:
-                self._vlc_mp.set_hwnd(self._canvas.winfo_id())
-            except Exception:
-                pass
+        """Canvas resized — re-attach so video fills the new size."""
+        self._reattach_window()
 
     def _start_poll(self):
         self._stop_poll()
@@ -2619,29 +2889,19 @@ class VideoPanel(ttk.Frame):
             self._poll_id = None
 
     def _poll_loop(self):
-        """Poll VLC position and update UI — no frame transfer needed."""
-        if self._vlc_mp is not None:
-            # Check for VLC error state
+        """Poll player position and update UI — no frame transfer needed."""
+        if self._player_ready():
             try:
-                import vlc as _vlc
-                state = self._vlc_mp.get_state()
-                if state == _vlc.State.Error:
-                    self._status_label.config(
-                        text='Video error — try a different file', foreground='red')
-                    self._playing = False
-                    if hasattr(self, '_play_btn'):
-                        self._play_btn.config(text='\u25b6 Play')
-                    self._poll_id = None
-                    return
+                if self._mpv.eof_reached and self._playing:
+                    self.after(0, self._on_eof)
             except Exception:
                 pass
 
-            # Try to read metadata if not yet cached
             if not self._meta_cached:
                 self._read_metadata()
 
             if self._playing:
-                ms = self._vlc_mp.get_time()
+                ms = self._get_time_ms()
                 if ms >= 0:
                     self._update_time_label_from_ms(float(ms))
                     if self._on_playback_tick is not None:
@@ -2652,9 +2912,11 @@ class VideoPanel(ttk.Frame):
     def _toggle_time_mode(self, *_):
         """Toggle between elapsed and remaining time display."""
         self._time_show_remaining = not self._time_show_remaining
-        self._label_tick = 0  # force immediate redraw
-        if self._vlc_mp is not None:
-            self._update_time_label_from_ms(float(max(0, self._vlc_mp.get_time())))
+        self._label_tick = 0
+        if self._player_ready():
+            ms = self._get_time_ms()
+            if ms >= 0:
+                self._update_time_label_from_ms(float(ms))
 
     def _update_time_label_from_ms(self, ms: float):
         """Update time label and seek bar from position in milliseconds (throttled)."""
@@ -2681,25 +2943,26 @@ class VideoPanel(ttk.Frame):
 
     def _on_seek_click(self, event):
         """Click or drag on the seek bar — jump directly to that position."""
-        if self._duration_s <= 0 or self._vlc_mp is None:
+        if self._duration_s <= 0 or not self._player_ready():
             return 'break'
         w = self._seek_bar.winfo_width()
         if w <= 0:
             return 'break'
         frac = max(0.0, min(1.0, event.x / w))
         pos_s = frac * self._duration_s
-        self._seek_bar.set(pos_s)   # fires _on_seek_bar via command callback
-        return 'break'              # suppress default ttk.Scale step behaviour
+        self._seek_bar.set(pos_s)
+        return 'break'
 
     def _on_seek_bar(self, val):
         """Seek bar value changed (by poll update or _on_seek_click)."""
-        if self._seek_updating or self._vlc_mp is None:
+        if self._seek_updating or not self._player_ready():
             return
         pos_s = float(val)
-        self._vlc_mp.set_time(max(0, int(pos_s * 1000)))
+        self._set_time_ms(max(0, int(pos_s * 1000)))
         self._update_time_label_from_ms(pos_s * 1000.0)
         if self._on_playback_tick is not None:
             self._on_playback_tick(pos_s * 1000.0)
+
 
 class CustomEventsBuilderDialog(tk.Toplevel):
     """
@@ -2775,6 +3038,9 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self.chapter_funscript_var = tk.BooleanVar(value=True)
         self._video_duration_ms    = None
         self.is_dirty            = False
+        self.confirm_replace_all_var = tk.BooleanVar(
+            value=bool(self.config.get('ui', {}).get('confirm_replace_all', True))
+        )
 
         self.setup_ui()
         self._load_funscript_duration()
@@ -2810,18 +3076,25 @@ class CustomEventsBuilderDialog(tk.Toplevel):
                 return
             # False → No, discard changes and close
         _theme.unregister(self._on_theme_change)
+        # Shut down mpv while the canvas window is still alive.
         if self._video_panel is not None:
-            self._video_panel.stop()
+            try:
+                self._video_panel.shutdown()
+            except Exception:
+                log.exception('video panel shutdown failed')
+            self._video_panel = None
         if self._on_closed:
             try:
                 self._on_closed()
             except Exception:
                 pass
             self._on_closed = None
-        # Delay destroy so ffpyplayer's internal C thread has time to wind down
-        # after close_player(). The primary fix is lazy video loading (no MediaPlayer
-        # is created at dialog construction), so this is a secondary safety margin.
-        self.after(1000, self.destroy)
+        try:
+            self.withdraw()
+        except Exception:
+            pass
+        # Short delay so libmpv teardown finishes before Tk destroys widgets.
+        self.after(100, self.destroy)
 
     def _on_theme_change(self, dark: bool):
         CanvasTimelinePanel.apply_canvas_theme(dark)
@@ -2884,13 +3157,27 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self._video_tick_count = 0
         self._pre_video_geometry: Optional[str] = None
 
-        if _VLC_AVAILABLE:
+        if _VIDEO_AVAILABLE:
             self._video_panel = VideoPanel(self._video_tab)
             self._video_panel.pack(fill=tk.BOTH, expand=True)
         else:
+            if _sys.platform.startswith('linux'):
+                hint = (
+                    'Video preview unavailable — need python-mpv + libmpv '
+                    '(e.g. apt install libmpv2).'
+                )
+            elif _sys.platform == 'win32':
+                hint = (
+                    'Video preview unavailable — need python-mpv + libmpv-2.dll '
+                    '(bundle via third_party/mpv for frozen builds).'
+                )
+            else:
+                hint = 'Video preview not supported on this platform.'
+            if _VIDEO_BACKEND_ERROR:
+                hint = f'{hint}\n{_VIDEO_BACKEND_ERROR}'
             ttk.Label(
                 self._video_tab,
-                text='VLC not available — video preview requires Windows + python-vlc.',
+                text=hint,
                 foreground='gray',
                 wraplength=280,
                 justify=tk.CENTER,
@@ -3135,6 +3422,12 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         ttk.Checkbutton(self._options_frame, text="Show waveform",
                         variable=self.show_waveform_var,
                         command=self._on_waveform_toggle).pack(side=tk.LEFT, padx=(15, 5))
+        ttk.Checkbutton(
+            self._options_frame,
+            text="Confirm Replace All",
+            variable=self.confirm_replace_all_var,
+            command=self._on_confirm_replace_all_toggle,
+        ).pack(side=tk.LEFT, padx=(10, 5))
 
         ttk.Separator(self._options_frame, orient='vertical').pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=2)
         ttk.Label(self._options_frame, text="Chapters:").pack(side=tk.LEFT)
@@ -3156,7 +3449,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         )
         self._dark_toggle_btn.pack(side=tk.LEFT, padx=2)
 
-        if _VLC_AVAILABLE:
+        if _VIDEO_AVAILABLE:
             ttk.Button(self._action_frame, text='Load Video',
                        command=self._load_video_dialog).pack(side=tk.LEFT, padx=2)
 
@@ -3193,30 +3486,72 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         if current == str(self._video_tab) and self._video_panel is not None:
             self.after_idle(self._video_panel.reattach_hwnd)
 
+    def _browse_initial_dir(self) -> Optional[str]:
+        """Folder for file pickers: funscript dir, else loaded events dir."""
+        import os
+        candidate = None
+        if self.last_processed_directory:
+            candidate = Path(self.last_processed_directory)
+        elif self.event_file_path:
+            candidate = Path(self.event_file_path).parent
+        if candidate is None:
+            return None
+        try:
+            candidate = candidate.expanduser().resolve()
+        except Exception:
+            try:
+                candidate = candidate.expanduser().absolute()
+            except Exception:
+                return None
+        if candidate.is_dir():
+            # normpath keeps Windows dialogs happy with native separators
+            return os.path.normpath(str(candidate))
+        return None
+
     def _load_video_dialog(self):
         """Open file picker to load a video file into the video panel."""
         if self._video_panel is None:
             return
-        from tkinter import filedialog
-        path = filedialog.askopenfilename(
+        kwargs = dict(
             title='Select Video File',
             filetypes=[('Video files', '*.mp4 *.mkv *.avi *.mov *.wmv *.m4v'),
                        ('All files', '*.*')],
             parent=self,
         )
+        initialdir = self._browse_initial_dir()
+        if initialdir:
+            kwargs['initialdir'] = initialdir
+        path = filedialog.askopenfilename(**kwargs)
         if path:
             self._center_nb.select(self._video_tab)
             self.update_idletasks()
             self._video_panel.load(path)
 
     def _try_auto_load_video(self):
-        """Look for a matching video file in the same directory as the events file."""
-        if self._video_panel is None or not self.last_processed_directory or not self.last_processed_filename:
+        """Look for a matching video file next to the events/funscript basename."""
+        if self._video_panel is None:
             return
         from pathlib import Path
+        directory = None
+        basename = None
+        if self.last_processed_directory and self.last_processed_filename:
+            directory = Path(self.last_processed_directory)
+            basename = self.last_processed_filename
+        elif self.event_file_path:
+            p = Path(self.event_file_path)
+            directory = p.parent
+            name = p.name
+            for suffix in ('.events.yml', '.events.yaml', '.yml', '.yaml'):
+                if name.endswith(suffix):
+                    basename = name[: -len(suffix)]
+                    break
+            if basename is None:
+                basename = p.stem
+        if not directory or not basename:
+            return
         for ext in ('.mp4', '.mkv', '.avi', '.mov', '.wmv', '.m4v',
                     '.MP4', '.MKV', '.AVI', '.MOV', '.WMV', '.M4V'):
-            candidate = Path(self.last_processed_directory) / f'{self.last_processed_filename}{ext}'
+            candidate = directory / f'{basename}{ext}'
             if candidate.exists():
                 self._center_nb.select(self._video_tab)
                 self.update_idletasks()
@@ -3396,6 +3731,7 @@ class CustomEventsBuilderDialog(tk.Toplevel):
 
         if self.event_file_path:
             self._try_load_matching_funscript(self.event_file_path)
+            self._try_auto_load_video()
 
     # ------------------------------------------------------------------ #
     # Dirty / apply-button state                                          #
@@ -3472,12 +3808,11 @@ class CustomEventsBuilderDialog(tk.Toplevel):
     # Library / parameter panel event handlers                            #
     # ------------------------------------------------------------------ #
 
-    def _on_favorites_changed(self, favorites: List[str]):
-        """Persist favorite event keys without rewriting the rest of config.json."""
+    def _persist_ui_setting(self, key: str, value: Any, label: str = "UI setting") -> None:
+        """Write one ui.* key into config.json without clobbering other keys."""
         from config import resolve_config_path
 
-        valid = [n for n in favorites if n in self.event_definitions]
-        self.config.setdefault('ui', {})['favorite_events'] = list(valid)
+        self.config.setdefault('ui', {})[key] = value
         try:
             path = resolve_config_path()
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -3485,11 +3820,16 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             if path.exists():
                 with open(path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-            data.setdefault('ui', {})['favorite_events'] = list(valid)
+            data.setdefault('ui', {})[key] = value
             with open(path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
-            log.warning("Failed to save favorite events: %s", e)
+            log.warning("Failed to save %s: %s", label, e)
+
+    def _on_favorites_changed(self, favorites: List[str]):
+        """Persist favorite event keys without rewriting the rest of config.json."""
+        valid = [n for n in favorites if n in self.event_definitions]
+        self._persist_ui_setting('favorite_events', list(valid), 'favorite events')
 
     def on_library_event_selected(self, event_name: str):
         """Handle event selection in the library panel (defaults for Add, not timeline edit)."""
@@ -3699,8 +4039,10 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             "filetypes": [("Funscript files", "*.funscript"), ("All files", "*.*")],
             "parent": self,
         }
-        if self.last_processed_directory and self.last_processed_filename:
-            dialog_kwargs["initialdir"] = str(self.last_processed_directory)
+        initialdir = self._browse_initial_dir()
+        if initialdir:
+            dialog_kwargs["initialdir"] = initialdir
+        if self.last_processed_filename:
             dialog_kwargs["initialfile"] = f"{self.last_processed_filename}.funscript"
 
         file_path = filedialog.askopenfilename(**dialog_kwargs)
@@ -3742,11 +4084,15 @@ class CustomEventsBuilderDialog(tk.Toplevel):
             )
 
     def on_load_file(self):
-        file_path = filedialog.askopenfilename(
+        kwargs = dict(
             title="Load Event File",
             filetypes=[("YAML files", "*.yml *.yaml"), ("All files", "*.*")],
-            parent=self
+            parent=self,
         )
+        initialdir = self._browse_initial_dir()
+        if initialdir:
+            kwargs['initialdir'] = initialdir
+        file_path = filedialog.askopenfilename(**kwargs)
         if not file_path:
             return
 
@@ -3766,10 +4112,20 @@ class CustomEventsBuilderDialog(tk.Toplevel):
         self.timeline_panel.load_events_from_yaml(events)
         self.event_file_path = Path(file_path)
         self.event_file_var.set(str(self.event_file_path))
+        # Keep picker seed aligned with the loaded events folder.
+        self.last_processed_directory = self.event_file_path.parent
+        name = self.event_file_path.name
+        for suffix in ('.events.yml', '.events.yaml', '.yml', '.yaml'):
+            if name.endswith(suffix):
+                self.last_processed_filename = name[: -len(suffix)]
+                break
+        else:
+            self.last_processed_filename = self.event_file_path.stem
         self.set_dirty(False)
         self.current_editing_index = None
         self.params_panel.show_placeholder()
         self._try_load_matching_funscript(self.event_file_path)
+        self._try_auto_load_video()
         return len(events)
 
     def _try_load_matching_funscript(self, events_path: Path):
@@ -3846,58 +4202,231 @@ class CustomEventsBuilderDialog(tk.Toplevel):
                 self.set_dirty(True)
 
     def on_change_event_type(self, idx: int):
-        """Show a dialog to change the type of a timeline event."""
+        """Show library picker to replace one event or all of the same type."""
         ev = self.timeline_panel.get_event(idx)
         if ev is None:
             return
 
+        old_name = ev['name']
+        match_count = sum(
+            1 for e in self.timeline_panel.events if e.get('name') == old_name
+        )
+        old_display = event_type_display_name(old_name)
+
         dlg = tk.Toplevel(self)
         dlg.title("Change Event Type")
-        dlg.resizable(False, False)
+        dlg.geometry("440x560")
+        dlg.minsize(360, 420)
         dlg.grab_set()
         dlg.transient(self)
 
-        ttk.Label(dlg, text="Select new event type:").pack(padx=12, pady=(12, 4))
+        ttk.Label(
+            dlg,
+            text=f"Current: {old_display} ({match_count} on timeline)",
+        ).pack(padx=12, pady=(12, 4), anchor='w')
 
-        event_names = sorted(self.event_definitions.keys())
-        var = tk.StringVar(value=ev['name'])
-        cb = ttk.Combobox(dlg, textvariable=var, values=event_names, state='readonly', width=38)
-        cb.pack(padx=12, pady=4)
-
+        selected_name: Dict[str, Optional[str]] = {'value': None}
+        target_var = tk.StringVar(value="Target: (none)")
         keep_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(dlg, text="Keep compatible parameters", variable=keep_var).pack(padx=12, pady=4)
 
-        result = {}
+        def _sync_main_favorites(favorites: List[str]):
+            self._on_favorites_changed(favorites)
+            self.library_panel.favorites = [
+                n for n in favorites if n in self.event_definitions
+            ]
+            self.library_panel._rebuild_tree()
 
-        def confirm():
-            result['name'] = var.get()
-            result['keep'] = keep_var.get()
+        def _on_pick(event_name: str):
+            selected_name['value'] = event_name
+            target_var.set(f"Target: {event_type_display_name(event_name)}")
+            can_replace = event_name != old_name
+            state = 'normal' if can_replace else 'disabled'
+            replace_one_btn.config(state=state)
+            replace_all_btn.config(state=state)
+
+        def _apply(scope: str):
+            new_name = selected_name['value']
+            if not new_name or new_name == old_name:
+                return
+            if new_name not in self.event_definitions:
+                return
+
+            if scope == 'all' and self.confirm_replace_all_var.get():
+                if not self._ask_replace_all_confirm(
+                    dlg,
+                    f"Replace all {match_count} instances of "
+                    f"{old_display} with {event_type_display_name(new_name)}?",
+                ):
+                    return
+
+            new_def = self.event_definitions[new_name]
+            defaults = dict(new_def.get('default_params') or {})
+            keep = keep_var.get()
+            focus_time = ev['time']
+
+            self.timeline_panel._push_history()
+            if scope == 'one':
+                target_idx = idx
+                if not (
+                    0 <= target_idx < len(self.timeline_panel.events)
+                    and self.timeline_panel.events[target_idx].get('name') == old_name
+                ):
+                    target_idx = next(
+                        (
+                            i for i, e in enumerate(self.timeline_panel.events)
+                            if e.get('name') == old_name and e.get('time') == focus_time
+                        ),
+                        None,
+                    )
+                if target_idx is None:
+                    return
+                count = replace_event_type(
+                    self.timeline_panel.events,
+                    new_name,
+                    defaults,
+                    keep,
+                    indices=[target_idx],
+                )
+            else:
+                count = replace_event_type(
+                    self.timeline_panel.events,
+                    new_name,
+                    defaults,
+                    keep,
+                    old_name=old_name,
+                )
+
+            if self.timeline_panel.auto_sort_var.get():
+                self.timeline_panel.events.sort(key=lambda e: e['time'])
+
+            focus_idx = next(
+                (
+                    i for i, e in enumerate(self.timeline_panel.events)
+                    if e.get('name') == new_name and e.get('time') == focus_time
+                ),
+                next(
+                    (
+                        i for i, e in enumerate(self.timeline_panel.events)
+                        if e.get('name') == new_name
+                    ),
+                    None,
+                ),
+            )
+
+            self.timeline_panel.selected_index = focus_idx
+            self.timeline_panel.refresh_display()
+            if self.timeline_panel.change_callback:
+                self.timeline_panel.change_callback()
+
+            if focus_idx is not None:
+                updated = self.timeline_panel.get_event(focus_idx)
+                self.current_editing_index = focus_idx
+                if updated:
+                    self.params_panel.load_event_parameters(
+                        new_name,
+                        new_def,
+                        current_params=updated.get('params') or {},
+                        event_time_ms=updated.get('time'),
+                        event_number=focus_idx,
+                    )
+
+            self.status_label.config(
+                text=f"Replaced {count} event(s): {old_display} → "
+                     f"{event_type_display_name(new_name)}"
+            )
             dlg.destroy()
+
+        picker_frame = ttk.Frame(dlg)
+        picker_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+
+        picker = EventLibraryPanel(
+            picker_frame,
+            self.event_definitions,
+            self.event_groups,
+            _on_pick,
+            favorites=self.library_panel.get_favorites(),
+            on_favorites_changed=_sync_main_favorites,
+            mode='picker',
+            on_confirm_callback=lambda _name: _apply('one'),
+        )
+        picker.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(dlg, textvariable=target_var).pack(padx=12, pady=(4, 0), anchor='w')
+
+        opts = ttk.Frame(dlg)
+        opts.pack(fill=tk.X, padx=12, pady=4)
+        ttk.Checkbutton(
+            opts, text="Keep compatible parameters", variable=keep_var
+        ).pack(anchor='w')
 
         btn_frame = ttk.Frame(dlg)
         btn_frame.pack(pady=(4, 12))
-        ttk.Button(btn_frame, text="OK",     command=confirm).pack(side=tk.LEFT, padx=4)
-        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT, padx=4)
+        replace_one_btn = ttk.Button(
+            btn_frame, text="Replace One", command=lambda: _apply('one'),
+            state='disabled',
+        )
+        replace_one_btn.pack(side=tk.LEFT, padx=4)
+        replace_all_btn = ttk.Button(
+            btn_frame,
+            text=f"Replace All ({match_count})",
+            command=lambda: _apply('all'),
+            state='disabled',
+        )
+        replace_all_btn.pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(
+            side=tk.LEFT, padx=4
+        )
+
         self.wait_window(dlg)
 
-        if not result:
-            return
-
-        new_name = result['name']
-        new_def = self.event_definitions[new_name]
-        new_params = dict(new_def['default_params'])
-
-        if result['keep']:
-            for k, v in ev['params'].items():
-                if k in new_params:
-                    new_params[k] = v
-
-        new_idx = self.timeline_panel.update_event(idx, ev['time'], new_name, new_params)
-        self.current_editing_index = new_idx
-        self.params_panel.load_event_parameters(
-            new_name, new_def, current_params=new_params,
-            event_time_ms=ev['time'], event_number=new_idx
+    def _on_confirm_replace_all_toggle(self):
+        """Persist Options-bar Confirm Replace All preference."""
+        self._persist_ui_setting(
+            'confirm_replace_all',
+            bool(self.confirm_replace_all_var.get()),
+            'confirm replace all',
         )
+
+    def _ask_replace_all_confirm(self, parent, message: str) -> bool:
+        """Yes/No Replace All confirm; checkbox persists future-prompt preference."""
+        result = {'ok': False}
+        ask_again = tk.BooleanVar(value=bool(self.confirm_replace_all_var.get()))
+        conf = tk.Toplevel(parent)
+        conf.title("Replace All")
+        conf.resizable(False, False)
+        conf.transient(parent)
+        conf.grab_set()
+
+        ttk.Label(conf, text=message, wraplength=360).pack(
+            padx=16, pady=(16, 8), anchor='w'
+        )
+        ttk.Checkbutton(
+            conf,
+            text="Ask for confirmation next time",
+            variable=ask_again,
+        ).pack(padx=16, pady=4, anchor='w')
+
+        def _yes():
+            new_pref = bool(ask_again.get())
+            self.confirm_replace_all_var.set(new_pref)
+            self._persist_ui_setting(
+                'confirm_replace_all', new_pref, 'confirm replace all'
+            )
+            result['ok'] = True
+            conf.destroy()
+
+        def _no():
+            conf.destroy()
+
+        btn_frame = ttk.Frame(conf)
+        btn_frame.pack(pady=(8, 16))
+        ttk.Button(btn_frame, text="Yes", command=_yes).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame, text="No", command=_no).pack(side=tk.LEFT, padx=4)
+
+        conf.bind('<Return>', lambda e: _yes())
+        conf.bind('<Escape>', lambda e: _no())
+        conf.wait_window()
+        return result['ok']
 
     def on_save_file(self):
         if not self.timeline_panel.events:

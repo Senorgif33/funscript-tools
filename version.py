@@ -287,9 +287,23 @@ Version information for Restim Funscript Processor
         6. Open Config Folder button opens the active config directory
         7. App icon: Restim mark with red wrench (assets/icon.png / icon.ico)
         8. Running AppImage sets Tk iconphoto so the panel/taskbar shows the app icon
+2.5.8 - cascade_cum event, Linux video/file UX, Custom Event Builder polish:
+        1. Added cascade_cum (General): 4-wave volume ↔ volume-prostate run-up,
+           then flat climax hold at volume_boost; goodBoy via pulse_frequency /
+           pulse_width only (no L0/alpha/beta/e1-e4 motion overwrite)
+        2. Timeline orgasm cue at orgasm_offset_ms; stretch duration lengthens hold
+        3. Custom Event Builder video uses libmpv (python-mpv) on Linux (tested) and
+           Windows (WIP — needs Windows boot test; frozen build needs libmpv-2.dll)
+        4. Linux native file dialogs via xdg-desktop-portal (zenity/kdialog/tk fallback)
+        5. Change Event Type uses Event Library picker; Replace One / Replace All
+           with optional confirm (ui.confirm_replace_all, persisted)
+        6. Funscript Browse remembers current folder; params mouse-wheel scroll;
+           Event Steps Preview sash-resizable
+        7. App icon: muted red wrench + stroke curve on rounded charcoal tile
+           (assets/icon.png / icon.ico / icon.svg); transparent outside tile
 """
 
-__version__ = "2.5.7"
+__version__ = "2.5.8"
 __app_name__ = "Restim Funscript Processor"
 __description__ = "GUI application for processing funscript files for electrostimulation devices"
 __author__ = "Funscript Tools Project"

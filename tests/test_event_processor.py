@@ -168,6 +168,74 @@ definitions:
         self.assertEqual(chapters[1]["name"], "General - Edge Test")
 
 
+class TestCascadeCumDerive(unittest.TestCase):
+    def _base_params(self, **overrides):
+        params = {
+            'duration_ms': 28000,
+            'orgasm_offset_ms': 8000,
+            'min_wave_ms': 2000,
+            'ramp_ms': 400,
+            'volume_boost': 0.28,
+            'volume_prostate_boost': 0.14,
+            'pulse_rate': 105,
+            'goodboy_pulse_rate': 27,
+            'goodboy_pulse_width': 50,
+            'pulse_width_trough': 35,
+        }
+        params.update(overrides)
+        return params
+
+    def test_default_hold_and_waves(self):
+        from processing.event_processor import _derive_cascade_cum_params
+
+        params = self._base_params(hold_ms=1)
+        _derive_cascade_cum_params(params, 'cascade_cum')
+        self.assertEqual(params['hold_ms'], 20000)
+        self.assertEqual(params['wave_ms'], 2000)
+        self.assertEqual(params['wave_ms_3'], 6000)
+        self.assertAlmostEqual(params['pulse_mod_center'], 66.0)
+        self.assertAlmostEqual(params['pulse_mod_amplitude'], 39.0)
+        self.assertNotIn('volume_presence_center', params)
+
+    def test_stretch_extends_hold(self):
+        from processing.event_processor import _derive_cascade_cum_params
+
+        params = self._base_params(duration_ms=40000)
+        _derive_cascade_cum_params(params, 'cascade_cum')
+        self.assertEqual(params['hold_ms'], 32000)
+
+    def test_runup_too_fast_raises(self):
+        from processing.event_processor import _derive_cascade_cum_params, EventProcessorError
+
+        params = self._base_params(orgasm_offset_ms=4000, min_wave_ms=2000)
+        with self.assertRaises(EventProcessorError):
+            _derive_cascade_cum_params(params, 'cascade_cum')
+
+    def test_too_short_raises(self):
+        from processing.event_processor import _derive_cascade_cum_params, EventProcessorError
+
+        params = self._base_params(duration_ms=8000, orgasm_offset_ms=8000)
+        with self.assertRaises(EventProcessorError):
+            _derive_cascade_cum_params(params, 'cascade_cum')
+
+    def test_definition_loads(self):
+        from pathlib import Path
+        import yaml
+
+        root = Path(__file__).resolve().parents[1]
+        data = yaml.safe_load((root / 'config.event_definitions.yml').read_text(encoding='utf-8'))
+        defs = data['definitions']
+        self.assertIn('cascade_cum', defs)
+        self.assertIn('volume_boost', defs['cascade_cum']['default_params'])
+        axes = ' '.join(step.get('axis', '') for step in defs['cascade_cum'].get('steps', []))
+        self.assertIn('volume', axes)
+        self.assertIn('volume-prostate', axes)
+        self.assertIn('pulse_frequency', axes)
+        self.assertIn('pulse_width', axes)
+        self.assertNotIn('alpha', axes)
+        self.assertNotIn('e1', axes)
+
+
 class TestOrgasmCountdownDerive(unittest.TestCase):
     def test_default_duration_unchanged(self):
         from processing.event_processor import _derive_orgasm_countdown_params

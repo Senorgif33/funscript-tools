@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, messagebox
 import threading
 import traceback
 import sys
@@ -19,6 +19,7 @@ from ui.parameter_tabs import ParameterTabs
 from ui.conversion_tabs import ConversionTabs
 from ui.custom_events_builder import CustomEventsBuilderDialog
 from ui.funscript_generator_dialog import FunscriptGeneratorDialog
+from ui import native_filedialog as filedialog
 import ui.theme as _theme
 
 
@@ -222,6 +223,12 @@ class MainWindow:
                     pass
                 self._events_builder = None
 
+            # If user selected files but never hit Process, still seed builder paths.
+            if (not self.last_processed_directory) and self.input_files:
+                last = Path(self.input_files[-1])
+                self.last_processed_filename = last.stem
+                self.last_processed_directory = last.parent
+
             log("Opening Custom Event Builder")
             log(f"  last_processed_filename={self.last_processed_filename}")
             log(f"  last_processed_directory={self.last_processed_directory}")
@@ -266,19 +273,39 @@ class MainWindow:
 
 
 
+    def _remember_input_files(self, file_paths):
+        """Store selected funscripts and track folder for Event Builder pickers."""
+        self.input_files = list(file_paths)
+        if len(self.input_files) == 1:
+            self.input_file_var.set(self.input_files[0])
+        else:
+            self.input_file_var.set(f"{len(self.input_files)} files selected")
+        # Browse/drop should seed Event Builder initialdir (not only after Process).
+        last = Path(self.input_files[-1])
+        self.last_processed_filename = last.stem
+        self.last_processed_directory = last.parent
+
     def browse_input_file(self):
         """Open file dialog to select input funscript file(s)."""
-        file_paths = filedialog.askopenfilenames(
+        import os
+        kwargs = dict(
             title="Select Funscript File(s)",
-            filetypes=[("Funscript files", "*.funscript"), ("All files", "*.*")]
+            filetypes=[("Funscript files", "*.funscript"), ("All files", "*.*")],
         )
+        initialdir = None
+        if self.input_files:
+            initialdir = Path(self.input_files[-1]).parent
+        elif self.last_processed_directory:
+            initialdir = Path(self.last_processed_directory)
+        if initialdir is not None:
+            try:
+                if initialdir.is_dir():
+                    kwargs["initialdir"] = os.path.normpath(str(initialdir))
+            except OSError:
+                pass
+        file_paths = filedialog.askopenfilenames(**kwargs)
         if file_paths:
-            self.input_files = list(file_paths)
-            # Update display with count of selected files
-            if len(self.input_files) == 1:
-                self.input_file_var.set(self.input_files[0])
-            else:
-                self.input_file_var.set(f"{len(self.input_files)} files selected")
+            self._remember_input_files(file_paths)
 
     def on_drag_enter(self, event):
         """Visual feedback when dragging over drop zone."""
@@ -329,12 +356,7 @@ class MainWindow:
         ]
 
         if funscript_files:
-            self.input_files = funscript_files
-            # Update display with count of selected files
-            if len(self.input_files) == 1:
-                self.input_file_var.set(self.input_files[0])
-            else:
-                self.input_file_var.set(f"{len(self.input_files)} files selected")
+            self._remember_input_files(funscript_files)
         elif file_paths:
             # Files were dropped but none were .funscript
             messagebox.showwarning(

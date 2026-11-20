@@ -175,7 +175,8 @@ DEFAULT_CONFIG = {
     },
     "ui": {
         "dark_mode": False,
-        "favorite_events": []  # list of event definition keys
+        "favorite_events": [],  # list of event definition keys
+        "confirm_replace_all": True,  # ask before Replace All in event type dialog
     },
     "positional_axes": {
         "mode": "motion_axis",  # kept for backward compat; use generate_legacy/generate_motion_axis flags instead

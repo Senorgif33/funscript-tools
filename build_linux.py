@@ -79,6 +79,60 @@ def download_appimagetool():
             print(f"Curl fallback also failed: {e2}")
             return None
 
+# Playback-only preview: drop encoder/speech/VLC leftovers PyInstaller pulls via libmpv.
+# Keep libdav1d + libaom (AV1 decode), libav*, x264/x265/vpx, libmpv.
+_STRIP_MEDIA_PREFIXES = (
+    'libflite',
+    'libcodec2',
+    'libSvtAv1Enc',
+    'librav1e',
+    'libvlc.so',
+    'libvlccore',
+    'libopenmpt',
+    'libshine',
+    'libtwolame',
+    'libxvidcore',
+    'libopencore',
+    'libvo-amrwbenc',
+    'libcaca',
+    'libSDL2',
+    'libdb-5',
+    'libzmq',
+    'librabbitmq',
+    'libnorm',
+    'libsnappy',
+    'libpgm-',
+)
+
+
+def strip_unused_media_libs(bundle_path: str) -> None:
+    """Remove non-essential shared libs from the PyInstaller onedir bundle."""
+    internal = Path(bundle_path) / '_internal'
+    if not internal.is_dir():
+        print(f"strip: no _internal at {internal}")
+        return
+
+    removed = 0
+    bytes_freed = 0
+    for path in sorted(internal.iterdir()):
+        if not path.is_file():
+            continue
+        name = path.name
+        if any(name.startswith(prefix) for prefix in _STRIP_MEDIA_PREFIXES):
+            size = path.stat().st_size
+            path.unlink()
+            removed += 1
+            bytes_freed += size
+            print(f"  stripped {name} ({size / (1024 * 1024):.1f} MB)")
+
+    # Keep AV1 decode libs; warn if missing after collect.
+    for need in ('libmpv.so', 'libdav1d.so', 'libaom.so', 'libavcodec.so'):
+        if not any(p.name.startswith(need) for p in internal.iterdir() if p.is_file()):
+            print(f"  warning: expected {need}* not found in bundle")
+
+    print(f"strip: removed {removed} files, freed {bytes_freed / (1024 * 1024):.1f} MB")
+
+
 def build_linux_binary():
     """Build Linux binary using PyInstaller."""
     print(f"Building {__app_name__} v{__version__} for Linux...")
@@ -139,6 +193,8 @@ def build_linux_binary():
         linux_dist = Path("dist/linux/RestimFunscriptProcessor")
         if linux_dist.exists():
             print(f"Created binary bundle: {linux_dist}")
+            print("Stripping unused media encode/speech libs (keep AV1 decode)...")
+            strip_unused_media_libs(str(linux_dist))
             return str(linux_dist)
         else:
             print("Warning: Binary bundle not found")
@@ -298,7 +354,8 @@ QUICK START:
 1. Extract this folder to any location (e.g., ~/Applications or ~/Desktop)
 2. Make the AppImage executable: chmod +x RestimFunscriptProcessor.AppImage
 3. Double-click or run: ./RestimFunscriptProcessor.AppImage
-4. No additional dependencies required!
+4. No additional dependencies required for core processing.
+5. Video preview bundles libmpv + decode codecs (AV1 via dav1d/aom).
 
 ALTERNATIVE INSTALLATION:
 - Move RestimFunscriptProcessor.AppImage to ~/.local/bin/ or /usr/local/bin/

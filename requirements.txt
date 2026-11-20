@@ -3,6 +3,11 @@ matplotlib>=3.5.0
 pyinstaller>=5.0
 PyYAML>=6.0
 tkinterdnd2>=0.3.0
-python-vlc>=3.0.0  # Windows only; gracefully disabled on other platforms
+# Video preview (Custom Event Builder) — libmpv via python-mpv; no VLC.
+# Linux runtime: apt install libmpv2 (or mpv). AppImage bundles libmpv.
+# Windows frozen: put libmpv-2.dll in third_party/mpv/ (or set MPV_DIR) before
+#   pyinstaller funscript_processor.spec — see third_party/mpv/README.md
+#   Download: shinchiro mpv-dev-x86_64 from mpv-winbuild-cmake releases.
+python-mpv>=1.0.0
 sv-ttk>=2.6.0
 pybind11-rdp>=0.1.5

@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, messagebox
 import threading
 import zipfile
 from pathlib import Path
@@ -10,6 +10,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from processing.event_processor import process_events, _parse_and_validate_user_events, _load_event_definitions, EventProcessorError
 from config import resolve_event_definitions_path
+from ui import native_filedialog as filedialog
 
 
 def get_event_definitions_path() -> Path:

@@ -182,6 +182,11 @@ _ORGASM_COUNTDOWN_EVENTS = frozenset({
 _ORGASM_BASE_SEG_MS = 25867.0   # default orgasm enable → fade
 _ORGASM_BASE_GOODBOY_MS = 5000.0
 
+# cascade_cum: run-up fixed; hold fills remaining duration (no L0 motion).
+_CASCADE_CUM_EVENTS = frozenset({
+    'cascade_cum',
+})
+
 
 def _derive_orgasm_countdown_params(final_params: dict, event_name: str) -> None:
     """When duration stretches, extend climax (amp9) and scale goodBoy with it.
@@ -215,6 +220,68 @@ def _derive_orgasm_countdown_params(final_params: dict, event_name: str) -> None
 
     final_params['seg_orgasm_ms'] = int(round(seg_orgasm_ms))
     final_params['goodboy_duration_ms'] = int(round(goodboy_duration_ms))
+
+
+def _derive_cascade_cum_params(final_params: dict, event_name: str) -> None:
+    """Derive hold, cascade wave timing, and climax modulation helpers.
+
+    hold_ms = duration_ms - orgasm_offset_ms
+    wave_ms = orgasm_offset_ms / n_waves  (n_waves fixed at 4)
+    pulse/width mod center+amplitude so presence sine can invert-align.
+    """
+    if event_name not in _CASCADE_CUM_EVENTS:
+        return
+
+    n_waves = 4
+    try:
+        duration_ms = float(final_params.get('duration_ms', 0))
+        orgasm_offset_ms = float(final_params.get('orgasm_offset_ms', 8000))
+        ramp_ms = float(final_params.get('ramp_ms', 400))
+        min_wave_ms = float(final_params.get('min_wave_ms', 2000))
+        volume_boost = float(final_params.get('volume_boost', 0.28))
+        volume_prostate_boost = float(final_params.get('volume_prostate_boost', 0.14))
+        pulse_rate = float(final_params.get('pulse_rate', 105))
+        goodboy_pulse_rate = float(final_params.get('goodboy_pulse_rate', 27))
+        goodboy_pulse_width = float(final_params.get('goodboy_pulse_width', 50))
+        pulse_width_trough = float(final_params.get('pulse_width_trough', 35))
+    except (TypeError, ValueError) as e:
+        raise EventProcessorError(
+            f"Event '{event_name}': invalid cascade_cum params: {e}"
+        )
+
+    min_runup = n_waves * max(min_wave_ms, 1.0)
+    if orgasm_offset_ms < min_runup:
+        raise EventProcessorError(
+            f"Event '{event_name}': orgasm_offset_ms ({orgasm_offset_ms:g}) must be at least "
+            f"n_waves × min_wave_ms ({min_runup:g}) to keep cascade waves slow."
+        )
+
+    min_duration = orgasm_offset_ms + max(ramp_ms, 1.0)
+    if duration_ms < min_duration:
+        raise EventProcessorError(
+            f"Event '{event_name}': duration_ms ({duration_ms:g}) must be at least "
+            f"orgasm_offset_ms + ramp_ms ({min_duration:g})."
+        )
+
+    wave_ms = int(round(orgasm_offset_ms / n_waves))
+    final_params['hold_ms'] = int(round(duration_ms - orgasm_offset_ms))
+    final_params['wave_ms'] = wave_ms
+    final_params['wave_ms_2'] = wave_ms * 2
+    final_params['wave_ms_3'] = wave_ms * 3
+
+    # Cascade peaks / dips (land on full boosts by end of wave 4)
+    final_params['vol_peak_1'] = volume_boost * 0.40
+    final_params['vol_dip_1'] = volume_boost * 0.15
+    final_params['vol_peak_2'] = volume_boost
+    final_params['pros_peak_1'] = volume_prostate_boost * 0.45
+    final_params['pros_dip_1'] = volume_prostate_boost * 0.15
+    final_params['pros_peak_2'] = volume_prostate_boost
+
+    # Climax layer gate: pulse/width only (volume stays flat at boosts)
+    final_params['pulse_mod_center'] = (pulse_rate + goodboy_pulse_rate) / 2.0
+    final_params['pulse_mod_amplitude'] = abs(pulse_rate - goodboy_pulse_rate) / 2.0
+    final_params['width_mod_center'] = (goodboy_pulse_width + pulse_width_trough) / 2.0
+    final_params['width_mod_amplitude'] = abs(goodboy_pulse_width - pulse_width_trough) / 2.0
 
 
 def _resolve_l0_funscript(
@@ -282,6 +349,7 @@ def _parse_and_validate_user_events(
 
         _derive_step_ratio_params(final_params, event_name)
         _derive_orgasm_countdown_params(final_params, event_name)
+        _derive_cascade_cum_params(final_params, event_name)
         try:
             derive_extract_params(final_params, event_name)
         except ValueError as e:
@@ -380,6 +448,7 @@ def _check_event_apply_params(
     try:
         _derive_step_ratio_params(final_params, event_name)
         _derive_orgasm_countdown_params(final_params, event_name)
+        _derive_cascade_cum_params(final_params, event_name)
         derive_extract_params(final_params, event_name)
     except (EventProcessorError, ValueError) as e:
         issues.append(f"{where}: {e}")
